@@ -1,0 +1,4 @@
+= Oxide GitHub Actions Scale Set
+
+An Oxide implementation of GitHub Actions scale sets to provision ephemeral
+GitHub Actions runners on Oxide instances.
