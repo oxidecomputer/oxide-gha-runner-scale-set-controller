@@ -1,0 +1,75 @@
+# Application logging. Optional; defaults to level `info` and format `json`.
+log:
+  level: info
+  format: json
+
+# Maximum time to wait for in-flight runner cleanups and the GitHub listener
+# close step during shutdown. Optional; defaults to 30m when omitted.
+shutdown_timeout: 30m
+
+# GitHub connection and authentication.
+github:
+  # Registration target: an enterprise, organization, or repository.
+  #   Enterprise:   https://github.com/enterprises/my-enterprise
+  #   Organization: https://github.com/my-org
+  #   Repository:   https://github.com/my-org/my-repo
+  config_url: https://github.com/my-org/my-repo
+
+  # Authentication. Set exactly one of `app` or `pat`. The PAT token may come
+  # from GITHUB_TOKEN instead; YAML values take precedence.
+  auth:
+    app:
+      client_id: "Iv1.0123456789abcdef"
+      installation_id: 12345678
+      # May come from GITHUB_APP_PRIVATE_KEY instead; YAML takes precedence.
+      private_key: |
+        -----BEGIN RSA PRIVATE KEY-----
+        ...
+        -----END RSA PRIVATE KEY-----
+    # pat:
+    #   # May come from GITHUB_TOKEN instead; YAML takes precedence.
+    #   token: ghp_your_token_here
+
+# Oxide API credentials used to create instances. Host and token may come
+# from OXIDE_HOST and OXIDE_TOKEN instead; YAML values take precedence.
+oxide:
+  host: https://oxide.example.com
+  token: oxide-token-xxx
+
+# The runner scale set this process manages. Each process manages exactly one
+# scale set; run one process per scale set. By default, the scale set `name`
+# is also the only runner label workflows select with `runs-on: <name>`. If
+# `labels` is set, those are used exactly; include the scale set name in
+# `labels` if you still want `runs-on: <name>` to work.
+scale_set:
+  # Used in instance and boot disk names of the form
+  # `gha-runner-<name>-<16 hex characters>`. Must have at most 35 characters
+  # and contain only lowercase letters, digits, and hyphens.
+  name: linux-x64
+  # Optional. Defaults to `default` when omitted. Custom groups must already
+  # exist and be visible to the GitHub registration target above. Changing
+  # the group for an existing scale set name creates a new scale set in the
+  # new group and leaves the old one behind; delete the old one manually.
+  runner_group: default
+
+  # Optional. Defaults to the scale set name when omitted. If set, these
+  # labels are used exactly.
+  labels:
+    - linux-x64
+    - x64
+
+  # Set both values to 0 to drain the scale set. Drain mode stops acquiring
+  # new jobs, removes idle runners, and waits for busy runners to finish before
+  # removing them. Once no owned instances or disks remain, the process exits
+  # successfully. The GitHub scale set itself is retained.
+  min_runners: 0
+  max_runners: 10
+  instance:
+    project: actions-runners
+    image: ubuntu-22.04
+    # Optional. Defaults to 32 when omitted.
+    boot_disk_gib: 50
+    cpus: 2
+    memory_gib: 8
+    vpc: default
+    subnet: default

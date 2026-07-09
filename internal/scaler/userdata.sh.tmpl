@@ -1,0 +1,26 @@
+#!/bin/bash
+set -euo pipefail
+trap 'shutdown -h now' EXIT
+
+JIT_CONFIG="{{ .JITConfig }}"
+RUNNER_VERSION="2.335.1"
+RUNNER_ARCHIVE="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
+RUNNER_SHA256="4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
+RUNNER_URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_ARCHIVE}"
+
+# Bound each download attempt and the total retry window so a
+# network hang becomes a script failure, firing the shutdown trap.
+# Reconciliation reaps stopped instances; a hung one is invisible
+# to it.
+curl --fail --location --retry 3 \
+  --max-time 300 --retry-max-time 900 \
+  --output "/tmp/${RUNNER_ARCHIVE}" \
+  "${RUNNER_URL}"
+echo "${RUNNER_SHA256}  /tmp/${RUNNER_ARCHIVE}" | sha256sum --check
+tar --extract --gzip \
+  --file "/tmp/${RUNNER_ARCHIVE}" \
+  --directory /home/runner
+rm "/tmp/${RUNNER_ARCHIVE}"
+chown -R runner:runner /home/runner
+
+sudo -u runner -H bash -c "cd /home/runner && ./run.sh --jitconfig '${JIT_CONFIG}'" || true
