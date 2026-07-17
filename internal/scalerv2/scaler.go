@@ -806,7 +806,32 @@ func (s *Scaler) createInstance(
 			Name:        oxide.Name(name),
 			Ncpus:       oxide.InstanceCpuCount(s.instance.CPUs),
 			NetworkInterfaces: oxide.InstanceNetworkInterfaceAttachment{
-				Value: oxide.InstanceNetworkInterfaceAttachmentDefaultDualStack{},
+				Value: oxide.InstanceNetworkInterfaceAttachmentCreate{
+					Params: []oxide.InstanceNetworkInterfaceCreate{
+						{
+							Name:        oxide.Name(name),
+							Description: "Managed by oxide-actions-scaleset.",
+							IpConfig: oxide.PrivateIpStackCreate{
+								Value: oxide.PrivateIpStackCreateDualStack{
+									Value: oxide.PrivateIpStackCreateDualStackValue{
+										V4: oxide.PrivateIpv4StackCreate{
+											Ip: oxide.Ipv4Assignment{
+												Value: oxide.Ipv4AssignmentAuto{},
+											},
+										},
+										V6: oxide.PrivateIpv6StackCreate{
+											Ip: oxide.Ipv6Assignment{
+												Value: oxide.Ipv6AssignmentAuto{},
+											},
+										},
+									},
+								},
+							},
+							SubnetName: oxide.Name(s.instance.Subnet),
+							VpcName:    oxide.Name(s.instance.VPC),
+						},
+					},
+				},
 			},
 			Start:    new(true),
 			UserData: base64.StdEncoding.EncodeToString(userData.Bytes()),
