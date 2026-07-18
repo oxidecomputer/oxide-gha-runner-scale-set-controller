@@ -1,560 +1,277 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 package scaler
 
 import (
 	"context"
 	"errors"
-	"slices"
+	"fmt"
 	"strings"
 	"time"
 
-	"github.com/actions/scaleset"
 	"github.com/oxidecomputer/oxide.go/oxide"
 )
 
-// state is the reconcile loop's working memory, owned exclusively by
-// [Scaler.Run]. Everything else a pass needs is observed fresh from
-// Oxide and GitHub, so this holds only what cannot be observed: which
-// runners have run a job, and which runners have been retired and how
-// far their teardown has progressed.
-type state struct {
-	// desired is the runner count most recently reported by GitHub,
-	// or -1 before the first report. No scaling happens until it is
-	// known.
-	desired int
-
-	// drained is set after a complete observation finds no owned
-	// resources or pending teardown work in zero-capacity mode.
-	drained bool
-
-	// started tracks runners whose job started. Runners are single
-	// use, so a started runner is busy until it is retired. Scale-down
-	// only ever picks runners that never started a job.
-	started map[string]bool
-
-	// retired tracks runners whose teardown is in progress. Retirement
-	// is the single gateway to cleanup: every resource is deleted by
-	// retiring its runner name and letting teardown steps converge.
-	retired map[string]*retirement
-
-	// discovered tracks instance names already logged, so adopted or
-	// externally created instances are announced once.
-	discovered map[string]bool
-}
-
-// retireReason explains why a runner was retired. It is logged, and
-// drainInbox uses it to cancel a scale-down retirement when the
-// runner turns out to have won a job.
-type retireReason string
-
 const (
-	retiredJobCompleted        retireReason = "job completed"
-	retiredInstanceHalted      retireReason = "instance halted"
-	retiredProvisioningTimeout retireReason = "instance provisioning timed out"
-	retiredRegistrationGone    retireReason = "runner registration gone"
-	retiredOrphanedDisk        retireReason = "orphaned boot disk"
-	retiredScaleDown           retireReason = "scale down"
-	retiredCreateFailed        retireReason = "instance creation failed"
+	// reconcileInterval is the maximum amount of time to wait between
+	// reconciliations when no other event has triggered reconciliation.
+	reconcileInterval = 5 * time.Minute
+
+	// reconcileRetryDelay controls how soon reconciliation is retried when work
+	// remains or an operation fails.
+	reconcileRetryDelay = 15 * time.Second
+
+	// reconcileTimeout limits how long one reconciliation runs for, including its
+	// Oxide and GitHub API operations.
+	reconcileTimeout = 5 * time.Minute
+
+	// githubAuditInterval limits how often GitHub runner registrations
+	// are reconciled against Oxide instances.
+	githubAuditInterval = 10 * time.Minute
 )
 
-// retirement records teardown progress for a retired runner. The
-// remaining progress is observed from Oxide each pass; only the GitHub
-// deregistration is remembered to avoid repeated lookups.
-type retirement struct {
-	reason       retireReason
-	deregistered bool
-
-	// sawNoRegistration records that a pass observed no GitHub
-	// registration for this runner while its instance was alive.
-	// Teardown requires the absence to hold across two passes before
-	// shutting down an alive instance, in case a single lookup was
-	// transiently inconsistent while the runner was busy.
-	sawNoRegistration bool
+// reconcileResult holds the earliest deadline requested by work performed
+// during one reconciliation. Deadlines are absolute so that time spent in the
+// rest of the reconciliation does not delay them.
+type reconcileResult struct {
+	nextReconcile time.Time
 }
 
-func newState() *state {
-	return &state{
-		desired:    -1,
-		started:    make(map[string]bool),
-		retired:    make(map[string]*retirement),
-		discovered: make(map[string]bool),
+func (r *reconcileResult) requestReconcile(at time.Time) {
+	if at.IsZero() {
+		return
+	}
+	if r.nextReconcile.IsZero() || at.Before(r.nextReconcile) {
+		r.nextReconcile = at
 	}
 }
 
-// reconcile performs one convergence pass and reports whether another
-// pass should run soon because work is still in progress or failed.
-// Passes never return errors; failures are logged and retried because
-// every step is idempotent.
+func nextReconcileAfter(delay time.Duration) time.Time {
+	return time.Now().Add(delay)
+}
+
+// ErrScaleSetDrained is returned by [Scaler.Run] when both [Config.MinRunners]
+// and [Config.MaxRunners] are zero and all resources owned by the scale set
+// have been removed.
+var ErrScaleSetDrained = errors.New("scale set drained")
+
+// Run is the blocking loop that periodically reconciles all the resources
+// managed by [Scaler]. It provisions new runners to meet demand and tears down
+// runners when they are no longer needed.
 //
-// An audit pass additionally verifies GitHub registrations of alive
-// instances and sweeps for orphaned disks. Those checks call GitHub
-// per instance, so they run on the audit interval rather than on every
-// pass.
-func (s *Scaler) reconcile(ctx context.Context, st *state, audit bool) (requeue bool) {
-	st.drained = false
-	s.drainInbox(st)
+// Each reconciliation runs in three steps:
+//
+//  1. Gather: Rebuild the in-memory state by querying GitHub runners,
+//     Oxide instances and disks, and joining them by name.
+//
+//  2. Plan: Mark runners whose GitHub runners, Oxide resources, or demand
+//     require teardown.
+//
+//  3. Act: Drive marked teardowns forward and provision new runners to meet
+//     demand, never exceeding [Config.MaxRunners].
+//
+// Run can be called before or after starting a listener to respond to GitHub
+// scale set messages.
+func (s *Scaler) Run(ctx context.Context) error {
+	state := newReconcileState()
 
-	instances, err := s.listInstances(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
+	// Run initial reconcile.
+	result, err := s.runReconcile(ctx, state, reconcileReasonInitial)
 	if err != nil {
-		s.logger.Error("listing instances failed", "error", err)
-		return true
+		return err
 	}
 
-	disks, err := s.listDisks(ctx)
-	if err != nil {
-		s.logger.Error("listing disks failed", "error", err)
-		return true
-	}
+	interval := time.NewTicker(reconcileInterval)
+	defer interval.Stop()
 
-	s.discover(st, instances)
-	s.retireDefunctRunners(ctx, st, instances, audit)
-	if audit {
-		s.retireOrphanedDisks(st, instances, disks)
-	}
-
-	s.teardown(ctx, st, instances, disks)
-	s.prune(st, instances)
-	created, retry := s.scale(ctx, st, instances)
-
-	s.active.Store(int64(activeRunnerCount(st, instances) + created))
-	st.drained = s.maxRunners == 0 && st.desired >= 0 &&
-		len(instances) == 0 && len(disks) == 0 && len(st.retired) == 0
-
-	// Runners still retired at the end of a pass — including ones just
-	// retired by scale-down or a failed creation — have teardown work
-	// left for the next pass, and a failed scale-up leaves a deficit
-	// to retry.
-	return retry || len(st.retired) > 0
-}
-
-// drainInbox moves facts recorded by the listener handlers into the
-// loop's state. A completed job retires its runner; teardown does the
-// rest.
-func (s *Scaler) drainInbox(st *state) {
-	s.mu.Lock()
-	st.desired = s.desired
-	events := s.events
-	s.events = nil
-	s.mu.Unlock()
-
-	for _, event := range events {
-		st.started[event.runnerName] = true
-		if r := st.retired[event.runnerName]; r != nil &&
-			r.reason == retiredScaleDown && !r.deregistered {
-			// The runner won the race: GitHub assigned it a job
-			// before scale-down could deregister it. Keep it; the
-			// instance halts when the job ends.
-			delete(st.retired, event.runnerName)
-			s.logger.Info("scale down canceled; job started",
-				"runner.name", event.runnerName,
-			)
-		}
-		if event.completed {
-			s.retire(st, event.runnerName, retiredJobCompleted)
-		}
-	}
-}
-
-func (s *Scaler) retire(st *state, name string, reason retireReason) {
-	if st.retired[name] != nil {
-		return
-	}
-	st.retired[name] = &retirement{reason: reason}
-	s.logger.Info("retiring runner",
-		"runner.name", name,
-		"retire.reason", reason,
-	)
-}
-
-// discover logs each owned instance the first time it is observed,
-// which announces adoption of instances left behind by a previous
-// process.
-func (s *Scaler) discover(st *state, instances map[string]oxide.Instance) {
-	for name, instance := range instances {
-		if st.discovered[name] {
-			continue
-		}
-		st.discovered[name] = true
-		s.logger.Info("discovered runner instance",
-			"runner.name", name,
-			"instance.state", instance.RunState,
-		)
-	}
-}
-
-// retireDefunctRunners retires runners that can no longer run a job:
-// their instance halted (the runner script shuts the instance down
-// when it exits, and instances never auto-restart), their instance
-// remained in an initial provisioning state for too long, or, on audit
-// passes, their GitHub registration is gone so no job will ever be
-// assigned to them. The grace period protects fresh resources.
-func (s *Scaler) retireDefunctRunners(
-	ctx context.Context,
-	st *state,
-	instances map[string]oxide.Instance,
-	audit bool,
-) {
-	for name, instance := range instances {
-		if st.retired[name] != nil {
-			continue
-		}
-		if !s.pastGracePeriod(instance.TimeCreated) {
-			continue
+	for {
+		var requeueCh <-chan time.Time
+		if !result.nextReconcile.IsZero() {
+			requeueCh = time.After(max(time.Until(result.nextReconcile), 0))
 		}
 
-		if instanceHalted(instance.RunState) {
-			s.retire(st, name, retiredInstanceHalted)
-			continue
-		}
-		if s.provisioningTimedOut(instance) {
-			s.retire(st, name, retiredProvisioningTimeout)
-			continue
+		var reason reconcileReason
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-s.wakeCh:
+			reason = reconcileReasonWake
+		case <-requeueCh:
+			reason = reconcileReasonRetry
+		case <-interval.C:
+			reason = reconcileReasonInterval
 		}
 
-		if !audit {
-			continue
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 
-		ref, err := s.scalesetClient.GetRunnerByName(ctx, name)
+		result, err = s.runReconcile(ctx, state, reason)
 		if err != nil {
-			s.logger.Error("fetching runner registration failed",
-				"runner.name", name,
-				"error", err,
-			)
-			continue
+			return err
 		}
-		switch {
-		case ref == nil:
-			s.retire(st, name, retiredRegistrationGone)
-		case ref.RunnerScaleSetID != s.scalesetID:
-			s.logger.Warn(
-				"instance name collides with a runner from another "+
-					"scale set; ensure scale set names are unique "+
-					"within the Oxide project",
-				"runner.name", name,
-				"runner.scale_set_id", ref.RunnerScaleSetID,
-			)
-		}
+		interval.Reset(reconcileInterval)
 	}
 }
 
-// retireOrphanedDisks retires runner names for which only a boot disk
-// remains, such as when a prior teardown deleted the instance but
-// failed before deleting the disk. Teardown then deletes the disk. The
-// grace period protects disks whose instance hasn't appeared in a
-// listing yet.
-func (s *Scaler) retireOrphanedDisks(
-	st *state,
-	instances map[string]oxide.Instance,
-	disks map[string]oxide.Disk,
-) {
-	for name, disk := range disks {
-		if st.retired[name] != nil {
-			continue
-		}
-		if _, ok := instances[name]; ok {
-			continue
-		}
-		if !s.pastGracePeriod(disk.TimeCreated) {
-			continue
-		}
-		s.retire(st, name, retiredOrphanedDisk)
-	}
-}
-
-// teardown advances every retired runner one step toward deletion. A
-// full teardown takes several passes: deregister from GitHub, stop the
-// instance, delete the instance, delete the boot disk. Each step is
-// observed fresh from the listings, so a teardown interrupted at any
-// point resumes where it left off, including across process restarts.
-func (s *Scaler) teardown(
-	ctx context.Context,
-	st *state,
-	instances map[string]oxide.Instance,
-	disks map[string]oxide.Disk,
-) {
-	for name, r := range st.retired {
-		s.teardownStep(ctx, st, name, r, instances, disks)
-	}
-}
-
-func (s *Scaler) teardownStep(
-	ctx context.Context,
-	st *state,
-	name string,
-	r *retirement,
-	instances map[string]oxide.Instance,
-	disks map[string]oxide.Disk,
-) {
-	logger := s.logger.With(
-		"runner.name", name,
-		"retire.reason", r.reason,
-	)
-
-	if !r.deregistered {
-		result, err := s.deregisterRunner(ctx, name)
-		if err != nil {
-			logger.Error("deregistering runner failed; will retry",
-				"error", err,
-			)
-			return
-		}
-		switch result {
-		case deregisterBusy:
-			// GitHub refused because the runner's job is still
-			// running, so retirement was premature: a stale event or
-			// a scale-down race. Stay retired and keep retrying;
-			// deregistration succeeds once the job ends. A scale-down
-			// retirement is canceled sooner, by its JobStarted fact.
-			st.started[name] = true
-			logger.Info("runner is still running a job; waiting")
-			return
-		case deregisterNotFound:
-			// A missing registration doesn't prove the runner is
-			// idle: a single lookup could be transiently inconsistent
-			// while a job runs. Before shutting down an alive
-			// instance, require the absence to hold across two passes
-			// — unless the job's end was itself observed.
-			instance, alive := instances[name]
-			if alive && !instanceHalted(instance.RunState) &&
-				r.reason != retiredJobCompleted &&
-				!r.sawNoRegistration {
-				r.sawNoRegistration = true
-				return
-			}
-		}
-		r.deregistered = true
-	}
-
-	if instance, ok := instances[name]; ok {
-		switch instance.RunState {
-		case oxide.InstanceStateStopped, oxide.InstanceStateFailed:
-			if err := s.deleteInstance(ctx, name); err != nil {
-				logger.Error("deleting instance failed; will retry",
-					"error", err,
-				)
-				return
-			}
-			logger.Info("deleted instance")
-		case oxide.InstanceStateStopping, oxide.InstanceStateDestroyed:
-			// Wait for the instance to settle.
-		default:
-			if err := s.stopInstance(ctx, name); err != nil {
-				logger.Error("stopping instance failed; will retry",
-					"error", err,
-				)
-			}
-		}
-		return
-	}
-
-	if disk, ok := disks[name]; ok {
-		switch disk.State.State() {
-		case oxide.DiskStateStateDetached, oxide.DiskStateStateFaulted:
-			if err := s.deleteDisk(ctx, name); err != nil {
-				logger.Error("deleting boot disk failed; will retry",
-					"error", err,
-				)
-				return
-			}
-			logger.Info("deleted boot disk")
-		default:
-			// Wait for the disk to detach.
-		}
-		return
-	}
-
-	delete(st.retired, name)
-	logger.Info("runner cleaned up")
-}
-
-// deregisterResult reports what deregisterRunner observed.
-type deregisterResult int
+// reconcileReason is the reason a reconciliation was started.
+type reconcileReason string
 
 const (
-	// deregisterRemoved means the registration was removed.
-	deregisterRemoved deregisterResult = iota
-	// deregisterBusy means GitHub refused because the runner's job is
-	// still running.
-	deregisterBusy
-	// deregisterNotFound means no registration owned by this scale
-	// set exists. A registration belonging to another scale set is
-	// left alone and reported as not found.
-	deregisterNotFound
+	reconcileReasonInitial  reconcileReason = "initial"
+	reconcileReasonWake     reconcileReason = "wake"
+	reconcileReasonRetry    reconcileReason = "retry"
+	reconcileReasonInterval reconcileReason = "interval"
 )
 
-// deregisterRunner removes the runner's GitHub registration.
-func (s *Scaler) deregisterRunner(ctx context.Context, name string) (deregisterResult, error) {
-	ref, err := s.scalesetClient.GetRunnerByName(ctx, name)
-	if err != nil {
-		return 0, err
-	}
-	if ref == nil {
-		return deregisterNotFound, nil
-	}
-	if ref.RunnerScaleSetID != s.scalesetID {
-		s.logger.Warn(
-			"runner registration belongs to another scale set; leaving it",
-			"runner.name", name,
-			"runner.scale_set_id", ref.RunnerScaleSetID,
-		)
-		return deregisterNotFound, nil
-	}
-
-	err = s.scalesetClient.RemoveRunner(ctx, int64(ref.ID))
-	if errors.Is(err, scaleset.JobStillRunningError) {
-		return deregisterBusy, nil
-	}
-	if err != nil {
-		return 0, err
-	}
-
-	s.logger.Info("deregistered runner", "runner.name", name)
-	return deregisterRemoved, nil
-}
-
-// prune drops bookkeeping for runner names that have no instance and
-// no teardown in progress, such as stale job events for runners of a
-// previous process.
-func (s *Scaler) prune(st *state, instances map[string]oxide.Instance) {
-	for name := range st.started {
-		if _, ok := instances[name]; !ok && st.retired[name] == nil {
-			delete(st.started, name)
-		}
-	}
-	for name := range st.discovered {
-		if _, ok := instances[name]; !ok && st.retired[name] == nil {
-			delete(st.discovered, name)
-		}
-	}
-}
-
-// scale converges the active runner count toward the desired count and
-// returns how many runners it created, plus whether a failure left a
-// deficit to retry. The desired count is bounded below by the
-// configured idle minimum and above by the configured maximum; the
-// maximum also caps total owned instances, including halted ones whose
-// teardown hasn't finished.
-func (s *Scaler) scale(
+// runReconcile is a wrapper around [Scaler.reconcile] used to bound a
+// reconciliation with a context.
+func (s *Scaler) runReconcile(
 	ctx context.Context,
-	st *state,
-	instances map[string]oxide.Instance,
-) (created int, retry bool) {
-	if st.desired < 0 {
-		// GitHub hasn't reported a desired count yet; scaling now
-		// could tear down runners that are about to be needed.
-		return 0, false
-	}
+	state *reconcileState,
+	reason reconcileReason,
+) (reconcileResult, error) {
+	reconcileCtx, cancelReconcile := context.WithTimeout(
+		ctx, reconcileTimeout,
+	)
+	defer cancelReconcile()
 
-	active := activeRunnerCount(st, instances)
-	target := min(st.desired+s.minRunners, s.maxRunners)
-
-	switch {
-	case active < target:
-		capacity := s.maxRunners - len(instances)
-		return s.scaleUp(ctx, st, min(target-active, capacity))
-	case active > target:
-		s.scaleDown(st, active-target, instances)
-	}
-
-	return 0, false
+	return s.reconcile(reconcileCtx, state, reason)
 }
 
-// scaleDown retires excess runners. Only runners that never started a
-// job are candidates, oldest first; if GitHub assigned a job to one in
-// the meantime, deregistration fails with a job-still-running error
-// and teardown backs off.
-func (s *Scaler) scaleDown(
-	st *state,
-	excess int,
-	instances map[string]oxide.Instance,
-) {
-	candidates := make([]oxide.Instance, 0, len(instances))
-	for name, instance := range instances {
-		if instanceHalted(instance.RunState) ||
-			st.retired[name] != nil ||
-			st.started[name] {
+// reconcile runs one gather, plan, act cycle over the unified runner view. All
+// of the resources managed by [Scaler] are prefixed with [Scaler.namePrefix],
+// allowing the gather step to rebuild the view even after a restart.
+func (s *Scaler) reconcile(
+	ctx context.Context,
+	state *reconcileState,
+	reason reconcileReason,
+) (reconcileResult, error) {
+	var result reconcileResult
+	s.processJobEvents(state)
+
+	s.logger.Info("reconcile started",
+		"reconcile.reason", reason,
+	)
+	defer s.logger.Info("reconcile finished",
+		"reconcile.reason", reason,
+	)
+
+	// Gather: Rebuild the in-memory state.
+	if err := s.observeRunners(ctx, state); err != nil {
+		s.logger.Error("failed observing runners", "error", err)
+		result.requestReconcile(nextReconcileAfter(reconcileRetryDelay))
+		return result, nil
+	}
+
+	// Plan: Mark runners for teardown.
+	s.markInstancesForTeardown(state)
+	s.markDisksForTeardown(state)
+
+	// The GitHub audit is bounded by an interval to limit expensive, rate-limited
+	// API operations. GitHub automatically removes runner registrations that have
+	// been offline for a period of time, so it's not critical to always reconcile.
+	if time.Since(state.lastGitHubAudit) >= githubAuditInterval {
+		auditRetry := s.markRegistrationsForTeardown(ctx, state)
+		result.requestReconcile(auditRetry)
+		if auditRetry.IsZero() {
+			state.lastGitHubAudit = time.Now()
+		}
+	}
+
+	// Reclaim runners whose scale-down can still be canceled before the teardown
+	// loop below makes those teardowns irreversible.
+	target := -1
+	if state.desiredRunnerCount >= 0 {
+		target = min(state.desiredRunnerCount+s.minRunners, s.maxRunners)
+		if active := state.activeRunnerCount(); active < target {
+			s.cancelPendingScaleDowns(state, target-active)
+		}
+	}
+
+	// Act: Drive marked teardowns forward and provision new runners to meet demand.
+	for _, runner := range state.runners {
+		if runner.teardown == nil {
 			continue
 		}
-		candidates = append(candidates, instance)
+		result.requestReconcile(s.teardown(ctx, runner))
 	}
+	state.prune()
 
-	slices.SortFunc(candidates, func(a, b oxide.Instance) int {
-		return timeCreatedOrZero(a.TimeCreated).Compare(
-			timeCreatedOrZero(b.TimeCreated),
-		)
-	})
-
-	for _, instance := range candidates[:min(excess, len(candidates))] {
-		s.retire(st, string(instance.Name), retiredScaleDown)
-	}
-}
-
-// activeRunnerCount counts instances that could run a job now or once
-// provisioned: alive and not retired.
-func activeRunnerCount(st *state, instances map[string]oxide.Instance) int {
-	active := 0
-	for name, instance := range instances {
-		if !instanceHalted(instance.RunState) && st.retired[name] == nil {
-			active++
+	active := state.activeRunnerCount()
+	if target >= 0 {
+		switch {
+		case active < target:
+			result.requestReconcile(s.scaleUp(ctx, state, active, target))
+		case active > target:
+			result.requestReconcile(s.scaleDown(state, active, target))
 		}
 	}
-	return active
-}
 
-// instanceHalted reports whether an instance can never host a working
-// runner again. Runner instances never restart once stopped: the
-// runner script shuts the instance down when it exits and the auto
-// restart policy is never.
-func instanceHalted(state oxide.InstanceState) bool {
-	switch state {
-	case oxide.InstanceStateStopped,
-		oxide.InstanceStateFailed,
-		oxide.InstanceStateDestroyed:
-		return true
-	}
-	return false
-}
+	s.activeRunnerCount.Store(int64(state.activeRunnerCount()))
 
-// pastGracePeriod reports whether a resource is old enough for
-// cleanup. The Oxide API always sets time_created, so a missing value
-// is malformed; it counts as past grace so such a resource stays
-// cleanable instead of gaining permanent protection.
-func (s *Scaler) pastGracePeriod(created *time.Time) bool {
-	return created == nil || time.Since(*created) >= s.gracePeriod
-}
-
-// provisioningTimedOut reports whether an instance has remained in its
-// initial creating or starting state for too long. The run-state timestamp
-// avoids reaping an older instance merely because it recently entered a
-// transitional state. TimeCreated is a fallback for malformed API responses.
-func (s *Scaler) provisioningTimedOut(instance oxide.Instance) bool {
-	switch instance.RunState {
-	case oxide.InstanceStateCreating, oxide.InstanceStateStarting:
-	default:
-		return false
+	if s.minRunners == 0 && s.maxRunners == 0 && len(state.runners) == 0 {
+		return reconcileResult{}, ErrScaleSetDrained
 	}
 
-	since := instance.TimeRunStateUpdated
-	if since == nil {
-		since = instance.TimeCreated
+	if state.teardownCount() > 0 && result.nextReconcile.IsZero() {
+		result.requestReconcile(nextReconcileAfter(reconcileRetryDelay))
 	}
-	return since == nil || time.Since(*since) >= s.provisioningTimeout
+
+	return result, nil
 }
 
-func timeCreatedOrZero(t *time.Time) time.Time {
-	if t == nil {
-		return time.Time{}
+// observeRunners rebuilds the in-memory state from the Oxide instances and
+// disks owned by [Scaler], joined by runner name.
+func (s *Scaler) observeRunners(
+	ctx context.Context,
+	state *reconcileState,
+) error {
+	instances, err := s.listOwnedInstances(ctx)
+	if err != nil {
+		return fmt.Errorf("listing owned instances: %w", err)
 	}
-	return *t
+
+	disks, err := s.listOwnedDisks(ctx)
+	if err != nil {
+		return fmt.Errorf("listing owned disks: %w", err)
+	}
+
+	for _, runner := range state.runners {
+		runner.instance = nil
+		runner.disk = nil
+	}
+	for name, instance := range instances {
+		state.runner(name).instance = &instance
+	}
+	for name, disk := range disks {
+		state.runner(name).disk = &disk
+	}
+
+	s.logger.Info("observed runners",
+		"runner.count", len(state.runners),
+		"instance.count", len(instances),
+		"disk.count", len(disks),
+	)
+
+	return nil
 }
 
-// listInstances returns the owned instances in the project, keyed by
-// name.
-func (s *Scaler) listInstances(ctx context.Context) (map[string]oxide.Instance, error) {
+// listOwnedInstances fetches all the Oxide instances that are managed by
+// [Scaler], returning a map of runner name to Oxide instance.
+func (s *Scaler) listOwnedInstances(
+	ctx context.Context,
+) (map[string]oxide.Instance, error) {
 	instances, err := s.oxideClient.InstanceListAllPages(
 		ctx,
 		oxide.InstanceListParams{
-			Project: oxide.NameOrId(s.instance.Project),
+			Project: oxide.NameOrId(s.instanceConfig.Project),
 		},
 	)
 	if err != nil {
@@ -572,11 +289,13 @@ func (s *Scaler) listInstances(ctx context.Context) (map[string]oxide.Instance, 
 	return owned, nil
 }
 
-// listDisks returns the owned boot disks in the project, keyed by
-// name. Boot disks share their instance's name.
-func (s *Scaler) listDisks(ctx context.Context) (map[string]oxide.Disk, error) {
+// listOwnedDisks fetches all the Oxide disks that are managed by [Scaler],
+// returning a map of runner name to Oxide disk.
+func (s *Scaler) listOwnedDisks(
+	ctx context.Context,
+) (map[string]oxide.Disk, error) {
 	disks, err := s.oxideClient.DiskListAllPages(ctx, oxide.DiskListParams{
-		Project: oxide.NameOrId(s.instance.Project),
+		Project: oxide.NameOrId(s.instanceConfig.Project),
 	})
 	if err != nil {
 		return nil, err
@@ -591,37 +310,4 @@ func (s *Scaler) listDisks(ctx context.Context) (map[string]oxide.Disk, error) {
 	}
 
 	return owned, nil
-}
-
-func (s *Scaler) stopInstance(ctx context.Context, name string) error {
-	_, err := s.oxideClient.InstanceStop(ctx, oxide.InstanceStopParams{
-		Project:  oxide.NameOrId(s.instance.Project),
-		Instance: oxide.NameOrId(name),
-	})
-	if errors.Is(err, oxide.ErrObjectNotFound) {
-		return nil
-	}
-	return err
-}
-
-func (s *Scaler) deleteInstance(ctx context.Context, name string) error {
-	err := s.oxideClient.InstanceDelete(ctx, oxide.InstanceDeleteParams{
-		Project:  oxide.NameOrId(s.instance.Project),
-		Instance: oxide.NameOrId(name),
-	})
-	if errors.Is(err, oxide.ErrObjectNotFound) {
-		return nil
-	}
-	return err
-}
-
-func (s *Scaler) deleteDisk(ctx context.Context, name string) error {
-	err := s.oxideClient.DiskDelete(ctx, oxide.DiskDeleteParams{
-		Project: oxide.NameOrId(s.instance.Project),
-		Disk:    oxide.NameOrId(name),
-	})
-	if errors.Is(err, oxide.ErrObjectNotFound) {
-		return nil
-	}
-	return err
 }

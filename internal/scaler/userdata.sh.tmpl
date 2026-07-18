@@ -1,12 +1,14 @@
-#!/bin/bash
-set -euo pipefail
+#!/bin/sh
+set -eu
 trap 'shutdown -h now' EXIT
 
 JIT_CONFIG="{{ .JITConfig }}"
-RUNNER_VERSION="2.335.1"
+RUNNER_VERSION="{{ .RunnerVersion }}"
 RUNNER_ARCHIVE="actions-runner-linux-x64-${RUNNER_VERSION}.tar.gz"
-RUNNER_SHA256="4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf"
+RUNNER_SHA256="{{ .RunnerSHA256 }}"
 RUNNER_URL="https://github.com/actions/runner/releases/download/v${RUNNER_VERSION}/${RUNNER_ARCHIVE}"
+RUNNER_USER="actions-runner"
+RUNNER_DIR="/opt/actions-runner"
 
 # Bound each download attempt and the total retry window so a
 # network hang becomes a script failure, firing the shutdown trap.
@@ -16,11 +18,12 @@ curl --fail --location --retry 3 \
   --max-time 300 --retry-max-time 900 \
   --output "/tmp/${RUNNER_ARCHIVE}" \
   "${RUNNER_URL}"
-echo "${RUNNER_SHA256}  /tmp/${RUNNER_ARCHIVE}" | sha256sum --check
-tar --extract --gzip \
-  --file "/tmp/${RUNNER_ARCHIVE}" \
-  --directory /home/runner
+echo "${RUNNER_SHA256}  /tmp/${RUNNER_ARCHIVE}" | sha256sum -c
+useradd -m -d "${RUNNER_DIR}" -s /bin/sh "${RUNNER_USER}"
+tar -xzf "/tmp/${RUNNER_ARCHIVE}" -C "${RUNNER_DIR}"
 rm "/tmp/${RUNNER_ARCHIVE}"
-chown -R runner:runner /home/runner
+chown -R "${RUNNER_USER}" "${RUNNER_DIR}"
 
-sudo -u runner -H bash -c "cd /home/runner && ./run.sh --jitconfig '${JIT_CONFIG}'" || true
+su -s /bin/sh -c \
+  "cd '${RUNNER_DIR}' && exec ./run.sh --jitconfig '${JIT_CONFIG}'" \
+  "${RUNNER_USER}" || true
