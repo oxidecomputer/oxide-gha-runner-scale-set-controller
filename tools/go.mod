@@ -1,4 +1,4 @@
-module github.com/oxidecomputer/terraform-provider-oxide/tools
+module github.com/oxidecomputer/oxide-github-actions-runner-scaleset/tools
 
 go 1.26.4
 

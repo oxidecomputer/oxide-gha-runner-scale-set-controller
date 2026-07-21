@@ -25,15 +25,21 @@ jobs:
       - name: Development Environment
         run: nix develop --command go version
 
-      - name: Lint
-        run: >-
-          nix develop --command
-          go tool -modfile=tools/go.mod golangci-lint run ./...
+      - parallel:
+          - name: Check Formatting
+            run: nix develop --command make fmt-check
 
-      - name: Test
-        run: nix develop --command go test ./...
+          - name: Check Lint
+            run: nix develop --command make lint-check
 
-      - name: Build
-        run: >-
-          nix develop --command
-          go build -trimpath -o /tmp/oxide-actions-scaleset .
+          - name: Check Modules
+            run: nix develop --command make tidy-check
+
+      - parallel:
+          - name: Test
+            run: nix develop --command make test
+
+          - name: Build
+            run: >-
+              nix develop --command make build
+              BINARY=/tmp/oxide-actions-scaleset

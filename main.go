@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 package main
 
 import (
@@ -6,28 +10,32 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime/debug"
 	"syscall"
 
 	"github.com/actions/scaleset"
-	"github.com/oxidecomputer/oxide-actions-scaleset/internal/config"
+
+	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/config"
 )
 
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	configPath := flag.String("config", "config.yaml", "Path to configuration file")
 	showVersion := flag.Bool("version", false, "Print version")
 	flag.Parse()
 
 	info := getBuildInfo()
 	if *showVersion {
-		fmt.Printf("oxide-actions-scaleset %s\n", info.version)
-		return
+		fmt.Printf("%s %s\n", applicationName, info.version)
+		return 0
 	}
 
 	cfg, err := config.LoadFile(*configPath)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "oxide-actions-scaleset: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(os.Stderr, "%s: %v\n", applicationName, err)
+		return 1
 	}
 	logger := cfg.Logger()
 
@@ -37,56 +45,19 @@ func main() {
 	defer stop()
 
 	controller, err := newController(cfg, scaleset.SystemInfo{
-		System:    "oxide-actions-scaleset",
+		System:    applicationName,
 		Version:   info.version,
-		CommitSHA: info.vcsRevision,
+		CommitSHA: info.commit,
 		Subsystem: "controller",
 	})
 	if err != nil {
 		logger.Error("exiting", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	if err := controller.Run(ctx); err != nil {
 		logger.Error("exiting", "error", err)
-		os.Exit(1)
+		return 1
 	}
-}
-
-var buildInfo BuildInfo
-
-type BuildInfo struct {
-	version     string
-	vcsRevision string
-}
-
-func getBuildInfo() BuildInfo {
-	version := buildInfo.version
-	vcsRevision := buildInfo.vcsRevision
-	info, ok := debug.ReadBuildInfo()
-	if ok {
-		if version == "" {
-			version = info.Main.Version
-		}
-		if vcsRevision == "" {
-			for _, setting := range info.Settings {
-				if setting.Key == "vcs.revision" {
-					vcsRevision = setting.Value
-					break
-				}
-			}
-		}
-	}
-
-	if version == "" {
-		version = "unknown"
-	}
-	if vcsRevision == "" {
-		vcsRevision = "unknown"
-	}
-
-	return BuildInfo{
-		version:     version,
-		vcsRevision: vcsRevision,
-	}
+	return 0
 }

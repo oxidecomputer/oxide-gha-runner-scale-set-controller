@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 package main
 
 import (
@@ -8,9 +12,10 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
-	"github.com/oxidecomputer/oxide-actions-scaleset/internal/config"
-	"github.com/oxidecomputer/oxide-actions-scaleset/internal/scalerv2"
 	"github.com/oxidecomputer/oxide.go/oxide"
+
+	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/config"
+	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/scaler"
 )
 
 type controller struct {
@@ -18,6 +23,7 @@ type controller struct {
 	logger         *slog.Logger
 	scaleSetClient *scaleset.Client
 	oxideClient    *oxide.Client
+	systemInfo     scaleset.SystemInfo
 }
 
 func newController(
@@ -26,9 +32,9 @@ func newController(
 ) (*controller, error) {
 	logger := cfg.Logger().WithGroup(systemInfo.Subsystem)
 
-	scalesetClient, err := cfg.ScaleSetClient(systemInfo)
+	scaleSetClient, err := cfg.ScaleSetClient(systemInfo)
 	if err != nil {
-		return nil, fmt.Errorf("creating scaleset client: %w", err)
+		return nil, fmt.Errorf("creating scale set client: %w", err)
 	}
 
 	oxideClient, err := cfg.OxideClient()
@@ -36,7 +42,7 @@ func newController(
 		return nil, fmt.Errorf("creating oxide client: %w", err)
 	}
 
-	logger.Info("scale set client created",
+	logger.Info("clients created",
 		"github.config_url", cfg.GitHub.ConfigURL,
 		"scale_set.name", cfg.ScaleSet.Name,
 	)
@@ -44,131 +50,186 @@ func newController(
 	return &controller{
 		config:         cfg,
 		logger:         logger,
-		scaleSetClient: scalesetClient,
+		scaleSetClient: scaleSetClient,
 		oxideClient:    oxideClient,
+		systemInfo:     systemInfo,
 	}, nil
 }
 
-// Run drives the controller logic. It ensures the scale set exists, opens
-// a listener message session on the scale set, and runs the Oxide scaler to
-// reponse to scale set events.
+// Run adopts or creates the configured scale set, starts its listener and
+// scaler, and waits until one exits or the context is canceled.
 func (c *controller) Run(ctx context.Context) (err error) {
-	shutdownTimeout := c.config.ShutdownTimeoutDuration()
-
-	scaleSet, err := c.ensureScaleSet(ctx)
+	runnerScaleSet, err := c.ensureScaleSet(ctx)
 	if err != nil {
-		return fmt.Errorf("creating scale set: %w", err)
+		return fmt.Errorf("ensuring scale set: %w", err)
 	}
+	c.systemInfo.ScaleSetID = runnerScaleSet.ID
+	c.scaleSetClient.SetSystemInfo(c.systemInfo)
 
 	logger := c.logger.With(
-		"scale_set.name", scaleSet.Name,
-		"scale_set.id", scaleSet.ID,
+		"scale_set.name", runnerScaleSet.Name,
+		"scale_set.id", runnerScaleSet.ID,
 	)
-	minRunners := int(c.config.ScaleSet.MinRunners)
-	maxRunners := int(c.config.ScaleSet.MaxRunners)
 
-	// oxideScaler, err := scaler.New(scaler.Config{
-	// 	OxideClient:    c.oxideClient,
-	// 	ScaleSetClient: c.scaleSetClient,
-	// 	Instance:       &c.config.ScaleSet.Instance,
-	// 	Logger:         c.logger,
-	// 	ScaleSetName:   c.config.ScaleSet.Name,
-	// 	ScaleSetID:     scaleSet.ID,
-	// 	MinRunners:     minRunners,
-	// 	MaxRunners:     maxRunners,
-	// })
-	oxideScaler, err := scalerv2.New(
-		c.oxideClient,
-		c.scaleSetClient,
-		&c.config.ScaleSet.Instance,
-		c.logger,
-		c.config.ScaleSet.Name,
-		scaleSet.ID,
-		minRunners,
-		maxRunners,
-	)
+	maxRunners := int(c.config.ScaleSet.MaxRunners)
+	runnerScaler, err := c.newScaler(runnerScaleSet.ID, logger)
 	if err != nil {
 		return fmt.Errorf("creating oxide scaler: %w", err)
 	}
 
-	messageSessionClient, err := c.scaleSetClient.MessageSessionClient(ctx, scaleSet.ID, "oxide-actions-scaleset")
+	sessionClient, err := c.scaleSetClient.MessageSessionClient(
+		ctx,
+		runnerScaleSet.ID,
+		applicationName,
+	)
 	if err != nil {
-		return fmt.Errorf("scale set %q: creating message session: %w", scaleSet.Name, err)
+		return fmt.Errorf(
+			"scale set %q: creating message session: %w",
+			runnerScaleSet.Name, err,
+		)
 	}
 
+	deleteScaleSet := false
 	defer func() {
-		closeCtx, cancelClose := context.WithTimeout(context.WithoutCancel(ctx), shutdownTimeout)
-		defer cancelClose()
-		if closeErr := messageSessionClient.Close(closeCtx); closeErr != nil {
+		cleanupCtx := context.WithoutCancel(ctx)
+		if closeErr := sessionClient.Close(cleanupCtx); closeErr != nil {
 			logger.Error("failed to close listener session",
 				"error", closeErr,
 			)
 			err = errors.Join(err, fmt.Errorf(
 				"scale set %q: closing listener session: %w",
-				scaleSet.Name, closeErr,
+				runnerScaleSet.Name, closeErr,
 			))
 		}
+
+		if !deleteScaleSet {
+			return
+		}
+		if deleteErr := c.scaleSetClient.DeleteRunnerScaleSet(
+			cleanupCtx, runnerScaleSet.ID,
+		); deleteErr != nil {
+			err = errors.Join(err, fmt.Errorf(
+				"scale set %q: deleting after drain: %w",
+				runnerScaleSet.Name, deleteErr,
+			))
+			return
+		}
+		logger.Info("drained scale set deleted")
 	}()
 
-	scalesetListener, err := listener.New(
-		messageSessionClient,
+	scaleSetListener, err := listener.New(
+		sessionClient,
 		listener.Config{
-			ScaleSetID: scaleSet.ID,
+			ScaleSetID: runnerScaleSet.ID,
 			MaxRunners: maxRunners,
 			Logger:     logger.WithGroup("listener"),
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("scale set %q: creating listener: %w", scaleSet.Name, err)
+		return fmt.Errorf(
+			"scale set %q: creating listener: %w",
+			runnerScaleSet.Name, err,
+		)
 	}
 
-	// A canceled listener context requests graceful scaler shutdown below.
-	// Keep the scaler's hard-cancellation context detached so an in-flight
-	// runner transaction can finish unless the shutdown timeout expires.
-	listenerCtx, cancelListener := context.WithCancel(ctx)
+	if maxRunners == 0 {
+		logger.Info("scale set is draining; no new jobs will be acquired")
+	}
+
+	logger.Info("starting listener and scaler")
+	listenerErr, scalerErr := runListenerAndScaler(
+		ctx,
+		func(ctx context.Context) error {
+			return scaleSetListener.Run(ctx, runnerScaler)
+		},
+		runnerScaler.Run,
+	)
+
+	if errors.Is(scalerErr, scaler.ErrScaleSetDrained) {
+		deleteScaleSet = true
+		logger.Info("scale set drain complete")
+		return nil
+	}
+	if scalerErr != nil && !errors.Is(scalerErr, context.Canceled) {
+		return fmt.Errorf(
+			"scale set %q: running scaler: %w",
+			runnerScaleSet.Name, scalerErr,
+		)
+	}
+	if listenerErr != nil && !errors.Is(listenerErr, context.Canceled) {
+		return fmt.Errorf(
+			"scale set %q: running listener: %w",
+			runnerScaleSet.Name, listenerErr,
+		)
+	}
+
+	return nil
+}
+
+func (c *controller) newScaler(
+	scaleSetID int,
+	logger *slog.Logger,
+) (*scaler.Scaler, error) {
+	scaleSetConfig := c.config.ScaleSet
+	return scaler.New(
+		c.oxideClient,
+		c.scaleSetClient,
+		scaler.Config{
+			Instance: scaler.InstanceConfig(scaleSetConfig.Instance),
+			Logger: logger.WithGroup("scaler").With(
+				"project", scaleSetConfig.Instance.Project,
+			),
+			Runner: scaler.RunnerConfig{
+				Version: scaleSetConfig.Runner.Version,
+				SHA256:  scaleSetConfig.Runner.SHA256,
+			},
+			ScaleSet: scaler.ScaleSetConfig{
+				Namespace: c.config.GitHub.ConfigURL,
+				ID:        scaleSetID,
+			},
+			MinRunners: int(scaleSetConfig.MinRunners),
+			MaxRunners: int(scaleSetConfig.MaxRunners),
+		},
+	)
+}
+
+// runListenerAndScaler runs both components as peers. On process cancellation,
+// it stops and awaits the listener before canceling the scaler so the listener
+// can finish handling any message already in progress.
+func runListenerAndScaler(
+	ctx context.Context,
+	runListener func(context.Context) error,
+	runScaler func(context.Context) error,
+) (listenerErr, scalerErr error) {
+	listenerCtx, cancelListener := context.WithCancel(
+		context.WithoutCancel(ctx),
+	)
 	defer cancelListener()
 	scalerCtx, cancelScaler := context.WithCancel(context.WithoutCancel(ctx))
 	defer cancelScaler()
 
+	listenerErrCh := make(chan error, 1)
 	scalerErrCh := make(chan error, 1)
 	go func() {
-		defer cancelListener()
-		scalerErrCh <- oxideScaler.Run(scalerCtx)
+		listenerErrCh <- runListener(listenerCtx)
+	}()
+	go func() {
+		scalerErrCh <- runScaler(scalerCtx)
 	}()
 
-	if c.config.ScaleSet.MaxRunners == 0 {
-		logger.Info("scale set is draining; no new jobs will be acquired")
+	select {
+	case <-ctx.Done():
+		cancelListener()
+		listenerErr = <-listenerErrCh
+		cancelScaler()
+		scalerErr = <-scalerErrCh
+	case listenerErr = <-listenerErrCh:
+		cancelScaler()
+		scalerErr = <-scalerErrCh
+	case scalerErr = <-scalerErrCh:
+		cancelListener()
+		listenerErr = <-listenerErrCh
 	}
 
-	logger.Info("starting listener")
-	listenerErr := scalesetListener.Run(listenerCtx, oxideScaler)
-
-	// Stop accepting messages, then let the scaler finish its current runner
-	// transaction. If graceful shutdown times out, hard cancellation aborts
-	// the in-flight API operation.
-	cancelListener()
-	// logger.Info("listener stopped; waiting for scaler shutdown",
-	// 	"shutdown.timeout", shutdownTimeout,
-	// )
-	// shutdownCtx, cancelShutdown := context.WithTimeout(
-	// 	context.WithoutCancel(ctx), shutdownTimeout,
-	// )
-	// shutdownErr := oxideScaler.Shutdown(shutdownCtx)
-	// cancelShutdown()
-	// if shutdownErr != nil {
-	// 	logger.Warn("graceful scaler shutdown timed out",
-	// 		"error", shutdownErr,
-	// 	)
-	cancelScaler()
-	// }
-	scalerErr := <-scalerErrCh
-
-	if scalerErr != nil && !errors.Is(scalerErr, context.Canceled) {
-		return fmt.Errorf("scale set %q: running scaler: %w", scaleSet.Name, scalerErr)
-	}
-	if listenerErr != nil && !errors.Is(listenerErr, context.Canceled) {
-		return fmt.Errorf("scale set %q: running listener: %w", scaleSet.Name, listenerErr)
-	}
-
-	return nil
+	return listenerErr, scalerErr
 }

@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 package main
 
 import (
@@ -12,46 +16,44 @@ import (
 // exists at every scope (i.e., repository, organization, enterprise).
 const defaultRunnerGroupID = 1
 
-// ensureScaleSet reconciles the configured runner scale set. An existing
-// scale set is adopted by name within the configured runner group, with
-// labels updated when needed. A missing scale set is created.
+// ensureScaleSet adopts the configured runner scale set by name and runner
+// group, reconciling its labels. It creates the scale set when none exists.
 func (c *controller) ensureScaleSet(
 	ctx context.Context,
 ) (*scaleset.RunnerScaleSet, error) {
 	logger := c.logger
-	scalesetClient := c.scaleSetClient
-	ss := c.config.ScaleSet
+	scaleSetClient := c.scaleSetClient
+	scaleSetConfig := c.config.ScaleSet
 
-	// Fetch the runner group ID and name.
 	runnerGroupID := defaultRunnerGroupID
 	runnerGroupName := scaleset.DefaultRunnerGroup
-	if ss.RunnerGroup != "" &&
-		ss.RunnerGroup != scaleset.DefaultRunnerGroup {
-		group, err := scalesetClient.GetRunnerGroupByName(ctx, ss.RunnerGroup)
+	if scaleSetConfig.RunnerGroup != "" &&
+		scaleSetConfig.RunnerGroup != scaleset.DefaultRunnerGroup {
+		group, err := scaleSetClient.GetRunnerGroupByName(
+			ctx, scaleSetConfig.RunnerGroup,
+		)
 		if err != nil {
 			return nil, fmt.Errorf(
 				"scale set %q: resolving runner group %q: %w",
-				ss.Name, ss.RunnerGroup, err,
+				scaleSetConfig.Name, scaleSetConfig.RunnerGroup, err,
 			)
 		}
 		runnerGroupID = group.ID
 		runnerGroupName = group.Name
 	}
 
-	// Check for an existing scale set. [scaleset.Client.GetRunnerScaleSet] returns
-	// (nil, nil) when a scale set doesn't exist.
-	existing, err := scalesetClient.GetRunnerScaleSet(
-		ctx, runnerGroupID, ss.Name,
+	existing, err := scaleSetClient.GetRunnerScaleSet(
+		ctx, runnerGroupID, scaleSetConfig.Name,
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"scale set %q: checking existence: %w", ss.Name, err,
+			"scale set %q: checking existence: %w", scaleSetConfig.Name, err,
 		)
 	}
 	if existing != nil {
-		desiredLabels := ss.RunnerLabels()
+		desiredLabels := scaleSetConfig.RunnerLabels()
 		if !sameLabelNames(desiredLabels, existing.Labels) {
-			updated, err := scalesetClient.UpdateRunnerScaleSet(
+			updated, err := scaleSetClient.UpdateRunnerScaleSet(
 				ctx,
 				existing.ID,
 				&scaleset.RunnerScaleSet{
@@ -60,7 +62,8 @@ func (c *controller) ensureScaleSet(
 			)
 			if err != nil {
 				return nil, fmt.Errorf(
-					"scale set %q: updating labels: %w", ss.Name, err,
+					"scale set %q: updating labels: %w",
+					scaleSetConfig.Name, err,
 				)
 			}
 
@@ -84,17 +87,17 @@ func (c *controller) ensureScaleSet(
 		return existing, nil
 	}
 
-	created, err := scalesetClient.CreateRunnerScaleSet(
+	created, err := scaleSetClient.CreateRunnerScaleSet(
 		ctx,
 		&scaleset.RunnerScaleSet{
-			Name:          ss.Name,
+			Name:          scaleSetConfig.Name,
 			RunnerGroupID: runnerGroupID,
-			Labels:        ss.RunnerLabels(),
+			Labels:        scaleSetConfig.RunnerLabels(),
 		},
 	)
 	if err != nil {
 		return nil, fmt.Errorf(
-			"scale set %q: creating: %w", ss.Name, err,
+			"scale set %q: creating: %w", scaleSetConfig.Name, err,
 		)
 	}
 

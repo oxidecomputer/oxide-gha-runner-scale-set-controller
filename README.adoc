@@ -5,22 +5,21 @@ Scale Set API.
 
 == How it works
 
-Each process manages exactly one GitHub Actions runner scale set:
+This program manages exactly one GitHub Actions scale set.
 
-. On startup, the controller looks for a scale set with the configured name in
-  the configured runner group. It adopts a matching scale set and reconciles
-  its labels, or creates the scale set when none exists. Adoption is based on
-  the name and runner group; it does not require the scale set to have been
-  created by this program.
+. On startup, the program looks for a scale set with the configured name in the
+  configured runner group. It adopts a matching scale set and reconciles its
+  labels, or creates the scale set when none exists. Adoption does not require
+  the scale set to have been created by this program.
 
-. The controller opens a listener session with GitHub. GitHub reports the
-  number of assigned jobs and job lifecycle events. The desired capacity is
-  `min(assigned jobs + min_runners, max_runners)`, so `min_runners` provides
-  warm, idle capacity in addition to current demand.
+. The program opens a scale set listener session with GitHub. GitHub reports
+  the number of assigned jobs and job lifecycle events. The desired capacity
+  is `min(assigned_jobs + min_runners, max_runners)`, so `min_runners` provides
+  warm, idle capacity to reduce job start latency.
 
 . A reconciliation loop compares desired capacity with the scale set's Oxide
-  resources. It runs when GitHub reports a change, retries unfinished work, and
-  periodically checks for resources that need cleanup.
+  resources. It runs when GitHub reports a change and periodically checks for
+  resources that need cleanup.
 
 . To add capacity, the controller requests a just-in-time runner registration
   from GitHub and creates an Oxide instance, boot disk, and network interface.
@@ -28,24 +27,24 @@ Each process manages exactly one GitHub Actions runner scale set:
   Actions runner, then starts it with the just-in-time registration. Each
   instance runs at most one workflow job.
 
-. After the job finishes, the controller removes the GitHub runner
-  registration, stops and deletes the Oxide instance, and deletes its boot
-  disk. Idle instances are removed in the same way when demand decreases.
+. After the job finishes, the program removes the GitHub runner registration,
+  stops and deletes the Oxide instance, and deletes its boot disk. Idle
+  instances are removed in the same way when demand decreases.
 
 === Stateless reconciliation and resource ownership
 
-The controller has no database or durable local state. It rebuilds its view by
+The program has no database or durable local state. It rebuilds its view by
 listing instances and boot disks in the configured Oxide project and checking
 the corresponding GitHub runner registrations. A restart resumes management of
-existing resources as long as the GitHub scope, scale set ID, and Oxide project
-remain the same.
+existing resources as long as the GitHub configuration URL, scale set ID, and
+Oxide project remain the same.
 
 Oxide resources do not have tags, so ownership is encoded in their names. Every
 runner name begins with `gha-runner-<hash>-`, where the hash is derived from the
 canonical `github.config_url` and GitHub scale set ID. The GitHub runner, Oxide
 instance, boot disk, and network interface use the same full runner name. The
-controller treats instances and disks with its prefix in the configured project
-as owned resources; do not use that prefix for manually managed resources.
+program treats instances and disks with its prefix in the configured project as
+owned resources. Do not use the same prefix for manually managed resources.
 
 Changing `github.config_url`, `scale_set.name`, or `scale_set.runner_group`
 selects a different GitHub scale set or ownership namespace. Changing the Oxide
@@ -63,8 +62,8 @@ See link:config.example.yaml[`config.example.yaml`] for example configuration.
 === GitHub authentication
 
 `github.config_url` selects the GitHub repository, organization, or enterprise
-where the runner scale set is registered. The controller supports exactly one
-of these authentication methods:
+where the runner scale set is registered. The controller supports exactly one of
+these authentication methods.
 
 * *GitHub App* is preferred for repository and organization scale sets. Set
   `github.auth.app.client_id`, `installation_id`, and `private_key`. The private
@@ -84,18 +83,17 @@ variables or another secret-injection mechanism for the private key or token.
 
 === Oxide authentication
 
-The controller authenticates to an Oxide silo with a device/API token. Set the
-silo URL and token with `oxide.host` and `oxide.token`, or use `OXIDE_HOST` and
+The controller authenticates to an Oxide silo with an API token. Set the silo
+URL and token with `oxide.host` and `oxide.token`, or use `OXIDE_HOST` and
 `OXIDE_TOKEN`. YAML values take precedence over environment variables.
 
-Use `oxide auth login --host <silo-url>` to create a token with the Oxide CLI;
-see the
+See the
 https://docs.oxide.computer/api/guides/authentication[Oxide authentication]
-for details. The controller does not read the Oxide CLI credentials file, so
-the host and raw token must be supplied explicitly through its configuration or
-environment.
+for information on generating credentials. The program does not read the Oxide
+CLI credentials file, so the host and API token must be supplied explicitly
+through its configuration or environment.
 
-The token's user needs access to the configured project and permission to view
+The API token needs access to the configured project and permission to view
 the image and manage instances and disks. Prefer environment variables or a
 secret-injection mechanism over storing the token in `config.yaml`.
 
@@ -105,7 +103,24 @@ The configured image must be Linux x64, execute instance user data as `root`,
 and provide `curl`, `sha256sum`, `tar`, `useradd`, `su`, `shutdown`, and the
 GitHub Actions runner's system dependencies. It also needs outbound HTTPS access
 to GitHub. Install any tools needed by workflows, such as Git or Docker, in the
-image; the controller only installs the GitHub Actions runner itself.
+image. The controller only installs the GitHub Actions runner itself.
+
+== Development
+
+Enter the Nix development environment, then use the Make targets to format,
+lint, tidy dependencies, test, and build the project.
+
+[source,console]
+----
+nix develop
+make fmt
+make lint
+make tidy
+make check
+----
+
+The `fmt`, `lint`, and `tidy` targets apply available fixes. `make check` checks
+all three without changing files before running the tests and build.
 
 == Usage
 
@@ -122,35 +137,35 @@ configuration with your own values.
 oxide-github-actions-runner-scaleset --config config.yaml
 ----
 
-Send `SIGINT` or `SIGTERM` to stop the controller.
+Send `SIGINT` or `SIGTERM` to stop the program.
 
 === Target the runners from a workflow
 
-The example includes `linux-x64` as a runner label, so a workflow can target the
-scale set by that label:
+The example configuration includes `oxide-scale-set` as a runner label, so a
+workflow can target the scale set by that label:
 
 [source,yaml]
 ----
-name: Oxide runner example
+name: Oxide CI/CD Example
 on: workflow_dispatch
 
 jobs:
   hello:
-    runs-on: linux-x64
+    runs-on: oxide-scale-set
     steps:
       - run: uname -a
 ----
 
 When `scale_set.labels` is omitted, the scale set name is its only label. When
-labels are configured, they replace that default; include the scale set name in
-the list if workflows should continue to use `runs-on: <scale-set-name>`.
+labels are configured, they replace that default. Include the scale set name
+in the labels if workflows should continue to use `runs-on: <scale-set-name>`.
 Runner groups can further restrict which repositories and workflows may use the
 scale set.
 
 == Drain a scale set
 
-Before changing the GitHub scope, scale set name, runner group, or Oxide
-project, stop the controller and set both runner limits to zero:
+Before changing the GitHub configuration URL, scale set name, runner group, or
+Oxide project, stop the controller and set both runner limits to zero:
 
 [source,yaml]
 ----

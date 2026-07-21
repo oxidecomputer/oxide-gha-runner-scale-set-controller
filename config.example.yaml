@@ -46,7 +46,7 @@ oxide:
 scale_set:
   # Used to find or create the GitHub runner scale set. Oxide instance and boot
   # disk names use an identifier derived from the GitHub scope and scale set ID.
-  name: my-scale-set
+  name: oxide-scale-set
   # Optional. Defaults to `default` when omitted. Custom groups must already
   # exist and be visible to the GitHub registration target above. Changing
   # the group for an existing scale set name creates a new scale set in the
@@ -58,7 +58,7 @@ scale_set:
   # Optional. Defaults to the scale set name when omitted or empty. Otherwise,
   # these labels are used exactly.
   labels:
-    - my-scale-set
+    - oxide-scale-set
     - linux
     - x64
 

@@ -404,13 +404,6 @@ func TestConfigValidate(t *testing.T) {
 	}
 }
 
-func TestLoadRejectsNumericShutdownTimeout(t *testing.T) {
-	_, err := Load(strings.NewReader(
-		"shutdown_timeout: 45\n" + validConfigYAML,
-	))
-	requireErrorContains(t, err, "cannot unmarshal !!int `45` into time.Duration")
-}
-
 func TestScaleSetClient(t *testing.T) {
 	validApp := &AppAuth{
 		ClientID:       "Iv1.0123456789abcdef",

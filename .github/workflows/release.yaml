@@ -26,6 +26,19 @@ jobs:
       - name: Development Environment
         run: nix develop --command go version
 
+      - parallel:
+          - name: Check Formatting
+            run: nix develop --command make fmt-check
+
+          - name: Check Lint
+            run: nix develop --command make lint-check
+
+          - name: Check Modules
+            run: nix develop --command make tidy-check
+
+      - name: Test
+        run: nix develop --command make test
+
       - name: Install GoReleaser
         uses: goreleaser/goreleaser-action@v7
         with:
