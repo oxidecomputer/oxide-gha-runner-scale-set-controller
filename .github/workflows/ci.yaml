@@ -1,0 +1,45 @@
+---
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Development Environment
+        run: nix develop --command go version
+
+      - parallel:
+          - name: Check Formatting
+            run: nix develop --command make fmt-check
+
+          - name: Check Lint
+            run: nix develop --command make lint-check
+
+          - name: Check Modules
+            run: nix develop --command make tidy-check
+
+      - parallel:
+          - name: Test
+            run: nix develop --command make test
+
+          - name: Build
+            run: >-
+              nix develop --command make build
+              BINARY=/tmp/oxide-actions-scaleset

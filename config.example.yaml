@@ -1,0 +1,98 @@
+---
+# Application logging. Optional. Defaults to level `info` and format `json`.
+# Valid levels are `debug`, `info`, `warn`, and `error`. Valid formats are
+# `json` and `text`.
+log:
+  level: info
+  format: json
+
+# GitHub connection and authentication.
+github:
+  # Registration target. An enterprise, organization, or repository.
+	# - Enterprise: https://github.com/enterprises/<enterprise-slug>
+	# - Organization: https://github.com/<org>
+	# - Repository: https://github.com/<org>/<repo>
+  # The canonical URL namespaces this scale set's Oxide resources. Drain the
+  # scale set before changing scopes or old resources will be left unmanaged.
+  config_url: https://github.com/my-org/my-repo
+
+  # Authentication. Set exactly one of `app` or `pat`. If `auth` is omitted,
+  # GITHUB_TOKEN is used as a PAT. YAML values take precedence over environment
+  # variables.
+  auth:
+    app:
+      client_id: "Iv1.0123456789abcdef"
+      installation_id: 12345678
+      # Set GITHUB_APP_PRIVATE_KEY or uncomment this field.
+      # private_key: |
+      #   -----BEGIN RSA PRIVATE KEY-----
+      #   ...
+      #   -----END RSA PRIVATE KEY-----
+    # pat:
+    #   # Set GITHUB_TOKEN or uncomment this field.
+    #   token: github_pat_your_token_here
+
+# Oxide API credentials used to create instances. Host and token may come
+# from OXIDE_HOST and OXIDE_TOKEN instead. YAML values take precedence.
+oxide:
+  host: https://oxide.sys.example.com
+  # token: oxide-token-xxx
+
+# The runner scale set this process manages. Each process manages exactly one
+# scale set. Run one process per scale set. By default, the scale set `name`
+# is also the only runner label workflows select with `runs-on: <name>`. If
+# `labels` is non-empty, those are used exactly. Include the scale set name in
+# `labels` if you still want `runs-on: <name>` to work.
+scale_set:
+  # Used to find or create the GitHub runner scale set. Oxide instance and boot
+  # disk names use an identifier derived from the GitHub scope and scale set ID.
+  name: oxide-scale-set
+  # Optional. Defaults to `default` when omitted. Custom groups must already
+  # exist and be visible to the GitHub registration target above. Changing
+  # the group for an existing scale set name creates a new scale set in the
+  # new group and resource namespace. Drain first, or delete the old GitHub
+  # scale set and Oxide resources manually. Workflows can select this value
+  # with `runs-on.group`.
+  runner_group: default
+
+  # Optional. Defaults to the scale set name when omitted or empty. Otherwise,
+  # these labels are used exactly.
+  labels:
+    - oxide-scale-set
+    - linux
+    - x64
+
+  # Required GitHub Actions runner release in X.Y.Z format and the SHA-256
+  # checksum of its Linux x64 archive. Obtain both from the runner release.
+  runner:
+    version: 2.335.1
+    sha256: 4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
+
+  # Set both values to 0 to drain the scale set. Drain mode stops acquiring
+  # new jobs, removes idle runners, and waits for busy runners to finish before
+  # removing them. Once no owned instances or disks remain, the GitHub scale
+  # set is deleted and the process exits successfully.
+  min_runners: 0
+  max_runners: 10
+
+  # Oxide instance configuration.
+  instance:
+    # The project in which instances and boot disks are created. Drain before
+    # changing it or resources in the old project will be left unmanaged.
+    project: actions-runners
+
+    # Project images are preferred. A silo image is used when no project image
+    # with this name exists. The image may use any Linux distribution. It must
+    # execute user data as root and provide curl, sha256sum, tar, useradd, su,
+    # shutdown, and the GitHub Actions runner's system dependencies.
+    image: ubuntu-22.04
+
+    # Optional. When smaller than the image, the image size is used, rounded up
+    # to a whole GiB.
+    boot_disk_gib: 32
+
+    # Instance compute and network settings.
+    cpus: 2
+    memory_gib: 16
+    vpc: default
+    subnet: default

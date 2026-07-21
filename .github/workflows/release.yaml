@@ -1,0 +1,51 @@
+---
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@v31
+        with:
+          github_access_token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Development Environment
+        run: nix develop --command go version
+
+      - parallel:
+          - name: Check Formatting
+            run: nix develop --command make fmt-check
+
+          - name: Check Lint
+            run: nix develop --command make lint-check
+
+          - name: Check Modules
+            run: nix develop --command make tidy-check
+
+      - name: Test
+        run: nix develop --command make test
+
+      - name: Install GoReleaser
+        uses: goreleaser/goreleaser-action@v7
+        with:
+          version: "~> v2"
+          install-only: true
+
+      - name: Draft Release
+        run: nix develop --command goreleaser release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
