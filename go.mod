@@ -1,4 +1,4 @@
-module github.com/oxidecomputer/oxide-actions-scaleset
+module github.com/oxidecomputer/oxide-github-actions-runner-scaleset
 
 go 1.26.4
 
