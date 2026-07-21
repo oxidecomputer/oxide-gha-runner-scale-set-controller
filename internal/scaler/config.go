@@ -5,12 +5,9 @@
 package scaler
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"math"
-	"strings"
 )
 
 const maxByteCountGiB = math.MaxUint64 / (1024 * 1024 * 1024)
@@ -22,9 +19,6 @@ type Config struct {
 
 	// ScaleSet configures the scale set runners are created within.
 	ScaleSet ScaleSetConfig
-
-	// Runner configures the GitHub Actions runner installed on each instance.
-	Runner RunnerConfig
 
 	// Instance configures the Oxide instance that's launched.
 	Instance InstanceConfig
@@ -44,9 +38,6 @@ type Config struct {
 
 // Validate validates [Config].
 func (c Config) Validate() error {
-	if err := c.Runner.Validate(); err != nil {
-		return fmt.Errorf("runner: %w", err)
-	}
 	if c.ScaleSet.Namespace == "" {
 		return fmt.Errorf("scale set namespace is required")
 	}
@@ -134,57 +125,4 @@ func (c InstanceConfig) Validate() error {
 		return fmt.Errorf("subnet is required")
 	}
 	return nil
-}
-
-// RunnerConfig configures the GitHub Actions runner installed on each
-// instance.
-type RunnerConfig struct {
-	// Version is the GitHub Actions runner release in X.Y.Z format.
-	Version string
-
-	// SHA256 is the SHA-256 checksum of the Linux x64 runner archive.
-	SHA256 string
-}
-
-// Validate validates the GitHub Actions runner configuration.
-func (c RunnerConfig) Validate() error {
-	if c.Version == "" {
-		return fmt.Errorf("version is required")
-	}
-	if !validRunnerVersion(c.Version) {
-		return fmt.Errorf("version must use X.Y.Z format")
-	}
-	if c.SHA256 == "" {
-		return fmt.Errorf("SHA-256 is required")
-	}
-	if len(c.SHA256) != sha256.Size*2 {
-		return fmt.Errorf(
-			"SHA-256 must be a 64-character hexadecimal checksum",
-		)
-	}
-	if _, err := hex.DecodeString(c.SHA256); err != nil {
-		return fmt.Errorf(
-			"SHA-256 must be a 64-character hexadecimal checksum",
-		)
-	}
-	return nil
-}
-
-// validRunnerVersion validates whether version is in X.Y.Z format.
-func validRunnerVersion(version string) bool {
-	components := strings.Split(version, ".")
-	if len(components) != 3 {
-		return false
-	}
-	for _, component := range components {
-		if component == "" {
-			return false
-		}
-		for _, char := range component {
-			if char < '0' || char > '9' {
-				return false
-			}
-		}
-	}
-	return true
 }

@@ -177,29 +177,25 @@ func TestCreateInstanceParams(t *testing.T) {
 	}
 }
 
-func TestUserDataTemplateRendersRunnerInputs(t *testing.T) {
+func TestUserDataTemplateWritesJITConfig(t *testing.T) {
 	var userData strings.Builder
 	err := userDataTemplate.Execute(&userData, struct {
-		JITConfig     string
-		RunnerVersion string
-		RunnerSHA256  string
+		JITConfig string
 	}{
-		JITConfig:     "encoded-jit-config",
-		RunnerVersion: "2.999.1",
-		RunnerSHA256:  strings.Repeat("a", 64),
+		JITConfig: "encoded-jit-config",
 	})
 	if err != nil {
 		t.Fatalf("rendering user data: %v", err)
 	}
 
-	rendered := userData.String()
-	for _, want := range []string{
-		"encoded-jit-config",
-		`RUNNER_VERSION="2.999.1"`,
-		`RUNNER_SHA256="` + strings.Repeat("a", 64) + `"`,
-	} {
-		if !strings.Contains(rendered, want) {
-			t.Errorf("expected rendered user data to contain %q", want)
-		}
+	const want = `#cloud-config
+write_files:
+  - path: /run/github-actions-runner/jitconfig
+    owner: root:root
+    permissions: '0600'
+    content: 'encoded-jit-config'
+`
+	if got := userData.String(); got != want {
+		t.Errorf("unexpected rendered user data:\n%s", got)
 	}
 }

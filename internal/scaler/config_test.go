@@ -128,50 +128,6 @@ func TestConfigValidation(t *testing.T) {
 			},
 			wantErr: "instance: subnet is required",
 		},
-		{
-			name: "missing runner version",
-			mutate: func(c *Config) {
-				c.Runner.Version = ""
-			},
-			wantErr: "runner: version is required",
-		},
-		{
-			name: "invalid runner version",
-			mutate: func(c *Config) {
-				c.Runner.Version = "2.335.1; reboot"
-			},
-			wantErr: "runner: version must use X.Y.Z format",
-		},
-		{
-			name: "runner version missing component",
-			mutate: func(c *Config) {
-				c.Runner.Version = "2.335"
-			},
-			wantErr: "runner: version must use X.Y.Z format",
-		},
-		{
-			name: "missing runner SHA-256",
-			mutate: func(c *Config) {
-				c.Runner.SHA256 = ""
-			},
-			wantErr: "runner: SHA-256 is required",
-		},
-		{
-			name: "short runner SHA-256",
-			mutate: func(c *Config) {
-				c.Runner.SHA256 = "abc123"
-			},
-			wantErr: "runner: SHA-256 must be a 64-character " +
-				"hexadecimal checksum",
-		},
-		{
-			name: "non-hexadecimal runner SHA-256",
-			mutate: func(c *Config) {
-				c.Runner.SHA256 = strings.Repeat("z", 64)
-			},
-			wantErr: "runner: SHA-256 must be a 64-character " +
-				"hexadecimal checksum",
-		},
 	}
 
 	for _, tt := range tests {

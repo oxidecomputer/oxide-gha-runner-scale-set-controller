@@ -34,7 +34,6 @@ type Scaler struct {
 	logger         *slog.Logger
 
 	scaleSet       ScaleSetConfig
-	runnerConfig   RunnerConfig
 	instanceConfig InstanceConfig
 	minRunners     int
 	maxRunners     int
@@ -76,7 +75,6 @@ func New(
 		scaleSet:           config.ScaleSet,
 		minRunners:         config.MinRunners,
 		maxRunners:         config.MaxRunners,
-		runnerConfig:       config.Runner,
 		mu:                 sync.Mutex{},
 		desiredRunnerCount: -1,
 		jobEvents:          make([]jobEvent, 0),

@@ -45,13 +45,6 @@ func TestLoad(t *testing.T) {
 			cfg.ScaleSet.MinRunners, cfg.ScaleSet.MaxRunners,
 		)
 	}
-	if cfg.ScaleSet.Runner.Version != "2.335.1" {
-		t.Fatalf("unexpected runner version: %q", cfg.ScaleSet.Runner.Version)
-	}
-	if cfg.ScaleSet.Runner.SHA256 !=
-		"4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf" {
-		t.Fatalf("unexpected runner SHA-256: %q", cfg.ScaleSet.Runner.SHA256)
-	}
 	if cfg.ScaleSet.Instance != validInstance() {
 		t.Fatalf("unexpected instance config: %#v", cfg.ScaleSet.Instance)
 	}
@@ -704,43 +697,6 @@ func TestScaleSetValidate(t *testing.T) {
 			wantErr: "name is required",
 		},
 		{
-			name: "requires runner version",
-			mutate: func(s *ScaleSet) {
-				s.Runner.Version = ""
-			},
-			wantErr: "runner.version is required",
-		},
-		{
-			name: "rejects invalid runner version",
-			mutate: func(s *ScaleSet) {
-				s.Runner.Version = "v2.335.1"
-			},
-			wantErr: "runner.version must use X.Y.Z format",
-		},
-		{
-			name: "requires runner checksum",
-			mutate: func(s *ScaleSet) {
-				s.Runner.SHA256 = ""
-			},
-			wantErr: "runner.sha256 is required",
-		},
-		{
-			name: "rejects invalid runner checksum",
-			mutate: func(s *ScaleSet) {
-				s.Runner.SHA256 = strings.Repeat("z", 64)
-			},
-			wantErr: "runner.sha256 must be a 64-character " +
-				"hexadecimal checksum",
-		},
-		{
-			name: "rejects short runner checksum",
-			mutate: func(s *ScaleSet) {
-				s.Runner.SHA256 = "abc123"
-			},
-			wantErr: "runner.sha256 must be a 64-character " +
-				"hexadecimal checksum",
-		},
-		{
 			name: "rejects empty labels",
 			mutate: func(s *ScaleSet) {
 				s.Labels = []string{"linux-x64", ""}
@@ -1005,12 +961,8 @@ func validConfig() Config {
 
 func validScaleSet(name string) ScaleSet {
 	return ScaleSet{
-		Name:   name,
-		Labels: []string{name, "self-hosted"},
-		Runner: Runner{
-			Version: "2.335.1",
-			SHA256:  "4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf",
-		},
+		Name:       name,
+		Labels:     []string{name, "self-hosted"},
 		MinRunners: 1,
 		MaxRunners: 2,
 		Instance:   validInstance(),
@@ -1072,9 +1024,6 @@ oxide:
 scale_set:
   name: linux-x64
   runner_group: oxide-runners
-  runner:
-    version: 2.335.1
-    sha256: 4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
   labels:
     - linux-x64
     - self-hosted

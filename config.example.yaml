@@ -62,12 +62,6 @@ scale_set:
     - linux
     - x64
 
-  # Required GitHub Actions runner release in X.Y.Z format and the SHA-256
-  # checksum of its Linux x64 archive. Obtain both from the runner release.
-  runner:
-    version: 2.335.1
-    sha256: 4ef2f25285f0ae4477f1fe1e346db76d2f3ebf03824e2ddd1973a2819bf6c8cf
-
   # Set both values to 0 to drain the scale set. Drain mode stops acquiring
   # new jobs, removes idle runners, and waits for busy runners to finish before
   # removing them. Once no owned instances or disks remain, the GitHub scale
