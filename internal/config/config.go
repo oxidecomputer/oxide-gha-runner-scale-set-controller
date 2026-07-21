@@ -1,14 +1,21 @@
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 package config
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
+	"net"
 	"net/url"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/actions/scaleset"
 	"github.com/oxidecomputer/oxide.go/oxide"
@@ -16,21 +23,15 @@ import (
 )
 
 const (
-	defaultShutdownTimeout = 30 * time.Minute
-
-	// maxScaleSetNameLength keeps instance names of the form
-	// "gha-runner-<scale set name>-<16 hex characters>" within Oxide's
-	// 63-character name limit.
-	maxScaleSetNameLength = 35
+	maxByteCountGiB = math.MaxUint64 / (1024 * 1024 * 1024)
 )
 
 // Config is the application configuration.
 type Config struct {
-	Log             Log           `yaml:"log"`
-	GitHub          GitHub        `yaml:"github"`
-	Oxide           Oxide         `yaml:"oxide"`
-	ShutdownTimeout time.Duration `yaml:"shutdown_timeout"`
-	ScaleSet        ScaleSet      `yaml:"scale_set"`
+	Log      Log      `yaml:"log"`
+	GitHub   GitHub   `yaml:"github"`
+	Oxide    Oxide    `yaml:"oxide"`
+	ScaleSet ScaleSet `yaml:"scale_set"`
 }
 
 // Log configures application logging.
@@ -42,12 +43,6 @@ type Log struct {
 	// Format is the logging format. When provided, it must be one of `json` or
 	// `text`. Defaults to `json` when unset.
 	Format string `yaml:"format"`
-
-	// level and text hold the values parsed by [Log.Validate]. Their zero values
-	// match the slog defaults so a config that has not been validated still
-	// produces a sane logger.
-	level slog.Level
-	text  bool
 }
 
 // GitHub configures how each scale set registers itself with GitHub.
@@ -59,6 +54,10 @@ type GitHub struct {
 	// - Enterprise: https://github.com/enterprises/<enterprise-slug>
 	// - Organization: https://github.com/<org>
 	// - Repository: https://github.com/<org>/<repo>
+	//
+	// The canonical URL also namespaces the Oxide resources managed for the
+	// scale set. Changing scopes leaves resources from the previous scope
+	// unmanaged, so drain the scale set before changing it.
 	ConfigURL string `yaml:"config_url"`
 
 	// Auth configures how to authenticate to GitHub. Exactly one of the nested
@@ -111,9 +110,8 @@ type Oxide struct {
 // launches to execute GitHub Actions workflow jobs. Each process manages
 // exactly one scale set; run one process per scale set.
 type ScaleSet struct {
-	// Name configures the runner scale set name. This is also used in Oxide
-	// instance and boot disk names and as the only runner label when
-	// [ScaleSet.Labels] is unset.
+	// Name configures the runner scale set name. It is also used as the only
+	// runner label when [ScaleSet.Labels] is unset.
 	//
 	// Workflows can target the name like this:
 	//
@@ -134,9 +132,9 @@ type ScaleSet struct {
 	RunnerGroup string `yaml:"runner_group"`
 
 	// Labels configures the GitHub runner labels used to match workflow jobs. If
-	// unset, [ScaleSet.Name] is used as the only label. If set, the configured
-	// labels are used exactly. Include [ScaleSet.Name] explicitly if workflows
-	// should still target the scale set by name.
+	// unset or empty, [ScaleSet.Name] is used as the only label. Otherwise, the
+	// configured labels are used exactly. Include [ScaleSet.Name] explicitly if
+	// workflows should still target the scale set by name.
 	//
 	// Workflows can target labels like this:
 	//
@@ -146,6 +144,9 @@ type ScaleSet struct {
 	//       - <label_b>
 	Labels []string `yaml:"labels"`
 
+	// Runner configures the GitHub Actions runner installed on each instance.
+	Runner Runner `yaml:"runner"`
+
 	// MinRunners is the minimum amount of runners to keep idle waiting for jobs.
 	// Set both MinRunners and MaxRunners to zero to drain the scale set.
 	MinRunners uint `yaml:"min_runners"`
@@ -153,13 +154,24 @@ type ScaleSet struct {
 	// MaxRunners is the maximum amount of runners to spawn to execute jobs. Zero
 	// is only valid when [ScaleSet.MinRunners] is also zero and puts the scale
 	// set in drain mode where no new jobs are acquired, idle runners are removed,
-	// and busy runners are removed after their jobs finish. The process exits
-	// successfully once no owned instances or boot disks remain. The GitHub scale
-	// set is retained.
+	// and busy runners are removed after their jobs finish. Once no owned
+	// instances or boot disks remain, the GitHub scale set is deleted and the
+	// process exits successfully.
 	MaxRunners uint `yaml:"max_runners"`
 
 	// Instance configures the Oxide instance the scale set launches.
 	Instance Instance `yaml:"instance"`
+}
+
+// Runner configures the GitHub Actions runner installed on each instance.
+type Runner struct {
+	// Version is the GitHub Actions runner release to install. It must be a
+	// version in X.Y.Z format.
+	Version string `yaml:"version"`
+
+	// SHA256 is the SHA-256 checksum of the Linux x64 runner archive for
+	// [Runner.Version].
+	SHA256 string `yaml:"sha256"`
 }
 
 // Instance configures the Oxide instance the scale set launches.
@@ -184,11 +196,11 @@ type Instance struct {
 	// VPC is the VPC name the instance uses for its network interface.
 	VPC string `yaml:"vpc"`
 
-	// Subnet is the VPC subnet the instance uses.
+	// Subnet is the VPC subnet name the instance uses for its network interface.
 	Subnet string `yaml:"subnet"`
 }
 
-// LoadFile reads, parses, and validates the config file at path.
+// LoadFile reads, parses, normalizes, and validates the config file at path.
 func LoadFile(path string) (*Config, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -198,13 +210,22 @@ func LoadFile(path string) (*Config, error) {
 	return Load(f)
 }
 
-// Load parses and validates the config read from r.
+// Load parses, normalizes, and validates the config read from r.
 func Load(r io.Reader) (*Config, error) {
 	var cfg Config
 	dec := yaml.NewDecoder(r)
 	dec.KnownFields(true)
 	if err := dec.Decode(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+	var extra yaml.Node
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return nil, fmt.Errorf("parsing config: %w", err)
+		}
+		return nil, fmt.Errorf(
+			"parsing config: multiple YAML documents are not supported",
+		)
 	}
 
 	cfg.applyEnvFallbacks()
@@ -243,31 +264,25 @@ func (c *Config) applyEnvFallbacks() {
 	}
 }
 
-// Logger builds a [slog.Logger] from the logging configuration parsed by
-// [Log.Validate]. Defaults to info level and JSON format when the
-// configuration has not been validated.
+// Logger builds a [slog.Logger] from the logging configuration. Invalid or
+// unset values use the info level and JSON format defaults.
 func (c *Config) Logger() *slog.Logger {
-	opts := &slog.HandlerOptions{Level: c.Log.level}
-	if c.Log.text {
+	level, _ := c.Log.slogLevel()
+	text, _ := c.Log.textFormat()
+	opts := &slog.HandlerOptions{Level: level}
+	if text {
 		return slog.New(slog.NewTextHandler(os.Stdout, opts))
 	}
 	return slog.New(slog.NewJSONHandler(os.Stdout, opts))
-}
-
-// ShutdownTimeoutDuration returns how long shutdown cleanup may run before
-// being interrupted. Defaults to 30 minutes when unset.
-func (c *Config) ShutdownTimeoutDuration() time.Duration {
-	if c.ShutdownTimeout <= 0 {
-		return defaultShutdownTimeout
-	}
-	return c.ShutdownTimeout
 }
 
 // ScaleSetClient builds a GitHub scale set API client.
 func (c *Config) ScaleSetClient(
 	info scaleset.SystemInfo,
 ) (*scaleset.Client, error) {
-	// Prefer GitHub App auth over PAT when both are present.
+	if err := c.GitHub.Auth.Validate(); err != nil {
+		return nil, err
+	}
 	if c.GitHub.Auth.App != nil {
 		return scaleset.NewClientWithGitHubApp(
 			scaleset.ClientWithGitHubAppConfig{
@@ -296,7 +311,7 @@ func (c *Config) OxideClient() (*oxide.Client, error) {
 }
 
 // RunnerLabels returns the labels configured for the scale set. If labels are
-// unset, labels default to the scale set name.
+// unset or empty, labels default to the scale set name.
 func (s *ScaleSet) RunnerLabels() []scaleset.Label {
 	if len(s.Labels) == 0 {
 		return []scaleset.Label{{Name: s.Name}}
@@ -309,18 +324,20 @@ func (s *ScaleSet) RunnerLabels() []scaleset.Label {
 	return labels
 }
 
-// Validate validates the application configuration.
+// Validate validates and normalizes the application configuration.
 func (c *Config) Validate() error {
 	if c.GitHub.ConfigURL == "" {
 		return fmt.Errorf("github.config_url is required")
 	}
-	if _, err := url.ParseRequestURI(c.GitHub.ConfigURL); err != nil {
+	configURL, err := canonicalGitHubScope(c.GitHub.ConfigURL)
+	if err != nil {
 		return fmt.Errorf(
 			"github.config_url is invalid: %w (expected a full URL "+
 				"like https://github.com/org or "+
 				"https://github.com/org/repo)", err,
 		)
 	}
+	c.GitHub.ConfigURL = configURL
 	if err := c.GitHub.Auth.Validate(); err != nil {
 		return err
 	}
@@ -330,9 +347,6 @@ func (c *Config) Validate() error {
 	if err := c.Log.Validate(); err != nil {
 		return err
 	}
-	if c.ShutdownTimeout < 0 {
-		return fmt.Errorf("shutdown_timeout must be >= 0")
-	}
 
 	if err := c.ScaleSet.Validate(); err != nil {
 		return fmt.Errorf("scale_set: %w", err)
@@ -341,7 +355,51 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Validate validates the GitHub authentication configuration.
+func canonicalGitHubScope(configURL string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(configURL))
+	if err != nil {
+		return "", fmt.Errorf("parsing URL: %w", err)
+	}
+	if !strings.EqualFold(u.Scheme, "https") || u.Host == "" {
+		return "", fmt.Errorf("must be an absolute HTTPS URL")
+	}
+	if u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return "", fmt.Errorf(
+			"must not include user information, a query, or a fragment",
+		)
+	}
+
+	hostname := strings.ToLower(u.Hostname())
+	if hostname == "" {
+		return "", fmt.Errorf("must include a host")
+	}
+	if hostname == "www.github.com" {
+		hostname = "github.com"
+	}
+
+	host := hostname
+	port := u.Port()
+	if port != "" && port != "443" {
+		host = net.JoinHostPort(hostname, port)
+	} else if strings.Contains(hostname, ":") {
+		host = "[" + hostname + "]"
+	}
+
+	path := strings.ToLower(strings.Trim(u.Path, "/"))
+	if path == "" {
+		return "", fmt.Errorf("must include a GitHub scope path")
+	}
+	parts := strings.Split(path, "/")
+	if len(parts) > 2 {
+		return "", fmt.Errorf(
+			"must identify a GitHub enterprise, organization, or repository",
+		)
+	}
+
+	return "https://" + host + "/" + path, nil
+}
+
+// Validate validates and normalizes the GitHub authentication configuration.
 func (a *Auth) Validate() error {
 	switch {
 	case a.App != nil && a.PAT != nil:
@@ -355,9 +413,11 @@ func (a *Auth) Validate() error {
 	}
 }
 
-// Validate validates the GitHub App authentication configuration.
+// Validate validates and normalizes the GitHub App authentication
+// configuration.
 func (a *AppAuth) Validate() error {
-	if a.PrivateKey == "" {
+	a.ClientID = strings.TrimSpace(a.ClientID)
+	if strings.TrimSpace(a.PrivateKey) == "" {
 		return fmt.Errorf(
 			"github.auth.app: app private key is required " +
 				"(or set GITHUB_APP_PRIVATE_KEY)",
@@ -372,8 +432,10 @@ func (a *AppAuth) Validate() error {
 	return nil
 }
 
-// Validate validates the GitHub personal access token configuration.
+// Validate validates and normalizes the GitHub personal access token
+// configuration.
 func (p *PATAuth) Validate() error {
+	p.Token = strings.TrimSpace(p.Token)
 	if p.Token == "" {
 		return fmt.Errorf(
 			"github.auth.pat.token is required (or set GITHUB_TOKEN)",
@@ -382,39 +444,52 @@ func (p *PATAuth) Validate() error {
 	return nil
 }
 
-// Validate validates the logging configuration and stores the parsed level
-// and format for [Config.Logger].
-func (l *Log) Validate() error {
-	switch strings.ToLower(l.Level) {
-	case "", "info":
-		l.level = slog.LevelInfo
-	case "debug":
-		l.level = slog.LevelDebug
-	case "warn":
-		l.level = slog.LevelWarn
-	case "error":
-		l.level = slog.LevelError
-	default:
-		return fmt.Errorf(
-			"log.level %q is invalid (debug, info, warn, error)",
-			l.Level,
-		)
+// Validate validates the logging configuration.
+func (l Log) Validate() error {
+	if _, err := l.slogLevel(); err != nil {
+		return err
 	}
-	switch strings.ToLower(l.Format) {
-	case "", "json":
-		l.text = false
-	case "text":
-		l.text = true
-	default:
-		return fmt.Errorf(
-			"log.format %q is invalid (json, text)", l.Format,
-		)
+	if _, err := l.textFormat(); err != nil {
+		return err
 	}
 	return nil
 }
 
-// Validate validates the Oxide configuration.
+func (l Log) slogLevel() (slog.Level, error) {
+	switch strings.ToLower(l.Level) {
+	case "", "info":
+		return slog.LevelInfo, nil
+	case "debug":
+		return slog.LevelDebug, nil
+	case "warn":
+		return slog.LevelWarn, nil
+	case "error":
+		return slog.LevelError, nil
+	default:
+		return slog.LevelInfo, fmt.Errorf(
+			"log.level %q is invalid (debug, info, warn, error)",
+			l.Level,
+		)
+	}
+}
+
+func (l Log) textFormat() (bool, error) {
+	switch strings.ToLower(l.Format) {
+	case "", "json":
+		return false, nil
+	case "text":
+		return true, nil
+	default:
+		return false, fmt.Errorf(
+			"log.format %q is invalid (json, text)", l.Format,
+		)
+	}
+}
+
+// Validate validates and normalizes the Oxide configuration.
 func (o *Oxide) Validate() error {
+	o.Host = strings.TrimSpace(o.Host)
+	o.Token = strings.TrimSpace(o.Token)
 	if o.Host == "" {
 		return fmt.Errorf("oxide.host is required (or set OXIDE_HOST)")
 	}
@@ -424,18 +499,30 @@ func (o *Oxide) Validate() error {
 	return nil
 }
 
-// Validate validates the runner scale set configuration.
+// Validate validates and normalizes the runner scale set configuration.
 func (s *ScaleSet) Validate() error {
+	s.Name = strings.TrimSpace(s.Name)
+	s.RunnerGroup = strings.TrimSpace(s.RunnerGroup)
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if len(s.Name) > maxScaleSetNameLength {
-		return fmt.Errorf("name %q is invalid: must be at most %d characters", s.Name, maxScaleSetNameLength)
+	if err := s.Runner.Validate(); err != nil {
+		return err
 	}
+	labelIndexes := make(map[string]int, len(s.Labels))
 	for i, label := range s.Labels {
-		if strings.TrimSpace(label) == "" {
+		label = strings.TrimSpace(label)
+		if label == "" {
 			return fmt.Errorf("labels[%d] is required", i)
 		}
+		key := strings.ToLower(label)
+		if previous, ok := labelIndexes[key]; ok {
+			return fmt.Errorf(
+				"labels[%d] duplicates labels[%d]", i, previous,
+			)
+		}
+		s.Labels[i] = label
+		labelIndexes[key] = i
 	}
 	if s.MinRunners > s.MaxRunners {
 		return fmt.Errorf("min_runners must be <= max_runners")
@@ -446,8 +533,54 @@ func (s *ScaleSet) Validate() error {
 	return s.Instance.Validate()
 }
 
-// Validate validates the Oxide instance configuration.
+// Validate validates the GitHub Actions runner configuration.
+func (r *Runner) Validate() error {
+	if r.Version == "" {
+		return fmt.Errorf("runner.version is required")
+	}
+	if !validRunnerVersion(r.Version) {
+		return fmt.Errorf("runner.version must use X.Y.Z format")
+	}
+	if r.SHA256 == "" {
+		return fmt.Errorf("runner.sha256 is required")
+	}
+	if len(r.SHA256) != sha256.Size*2 {
+		return fmt.Errorf(
+			"runner.sha256 must be a 64-character hexadecimal checksum",
+		)
+	}
+	if _, err := hex.DecodeString(r.SHA256); err != nil {
+		return fmt.Errorf(
+			"runner.sha256 must be a 64-character hexadecimal checksum",
+		)
+	}
+	return nil
+}
+
+func validRunnerVersion(version string) bool {
+	components := strings.Split(version, ".")
+	if len(components) != 3 {
+		return false
+	}
+	for _, component := range components {
+		if component == "" {
+			return false
+		}
+		for _, char := range component {
+			if char < '0' || char > '9' {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+// Validate validates and normalizes the Oxide instance configuration.
 func (i *Instance) Validate() error {
+	i.Project = strings.TrimSpace(i.Project)
+	i.VPC = strings.TrimSpace(i.VPC)
+	i.Subnet = strings.TrimSpace(i.Subnet)
+	i.Image = strings.TrimSpace(i.Image)
 	switch {
 	case i.Project == "":
 		return fmt.Errorf("instance.project is required")
@@ -457,10 +590,20 @@ func (i *Instance) Validate() error {
 		return fmt.Errorf("instance.subnet is required")
 	case i.Image == "":
 		return fmt.Errorf("instance.image is required")
+	case uint64(i.BootDiskGiB) > maxByteCountGiB:
+		return fmt.Errorf(
+			"instance.boot_disk_gib must be <= %d", maxByteCountGiB,
+		)
 	case i.CPUs == 0:
 		return fmt.Errorf("instance.cpus must be > 0")
+	case i.CPUs > math.MaxUint16:
+		return fmt.Errorf("instance.cpus must be <= %d", math.MaxUint16)
 	case i.MemoryGiB == 0:
 		return fmt.Errorf("instance.memory_gib must be > 0")
+	case uint64(i.MemoryGiB) > maxByteCountGiB:
+		return fmt.Errorf(
+			"instance.memory_gib must be <= %d", maxByteCountGiB,
+		)
 	}
 	return nil
 }
