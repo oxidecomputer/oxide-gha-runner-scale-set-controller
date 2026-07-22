@@ -14,7 +14,7 @@ import (
 
 	"github.com/actions/scaleset"
 
-	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/config"
+	"github.com/oxidecomputer/oxide-gha-runner-scale-set-controller/internal/config"
 )
 
 func main() {

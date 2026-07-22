@@ -1,5 +1,5 @@
 {
-  description = "oxide-github-actions-runner-scaleset";
+  description = "oxide-gha-runner-scale-set-controller";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";

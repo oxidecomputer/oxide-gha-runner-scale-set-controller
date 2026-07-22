@@ -42,4 +42,4 @@ jobs:
           - name: Build
             run: >-
               nix develop --command make build
-              BINARY=/tmp/oxide-actions-scaleset
+              BINARY=/tmp/oxide-gha-runner-scale-set-controller

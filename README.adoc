@@ -1,4 +1,4 @@
-= Oxide GitHub Actions Runner - Scale Set
+= Oxide GitHub Actions Runner Scale Set Controller
 
 Run GitHub Actions workflow jobs on ephemeral Oxide instances using the GitHub
 Scale Set API.
@@ -156,7 +156,7 @@ all three without changing files before running the tests and build.
 == Usage
 
 . Download a release binary from
-  https://github.com/oxidecomputer/oxide-github-actions-runner-scaleset/releases[GitHub releases].
+  https://github.com/oxidecomputer/oxide-gha-runner-scale-set-controller/releases[GitHub releases].
 
 . Copy `config.example.yaml` to `config.yaml` and replace the GitHub and Oxide
 configuration with your own values.
@@ -165,7 +165,7 @@ configuration with your own values.
 +
 [source,console]
 ----
-oxide-github-actions-runner-scaleset --config config.yaml
+oxide-gha-runner-scale-set-controller --config config.yaml
 ----
 
 Send `SIGINT` or `SIGTERM` to stop the program.
