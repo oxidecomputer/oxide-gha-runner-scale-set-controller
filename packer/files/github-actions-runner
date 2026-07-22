@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+readonly jit_config_path="/run/github-actions-runner/jitconfig"
+readonly install_dir="/opt/github-actions-runner"
+
+if [[ ! -s "${jit_config_path}" ]]; then
+  echo "JIT configuration is missing or empty" >&2
+  exit 1
+fi
+
+# Read and unlink the single-use credential before any workflow can execute.
+jit_config="$(<"${jit_config_path}")"
+rm -f "${jit_config_path}"
+
+if [[ -z "${jit_config}" ]]; then
+  echo "JIT configuration is empty" >&2
+  exit 1
+fi
+
+cd "${install_dir}"
+exec /usr/bin/setpriv \
+  --reuid=github-actions-runner \
+  --regid=github-actions-runner \
+  --init-groups \
+  -- \
+  "${install_dir}/run.sh" --jitconfig "${jit_config}"

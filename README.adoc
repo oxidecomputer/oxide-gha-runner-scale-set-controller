@@ -127,8 +127,11 @@ The configured image is responsible for the following.
 * Provide outbound HTTPS access to GitHub and any other services required by
   workflows.
 
-The link:https://github.com/oxidecomputer/packer-plugin-oxide[Oxide Packer
-plugin] can be used to automate building images that meets these requirements.
+This repository includes a link:packer[reference Packer configuration] for
+building an Ubuntu 26.04 image that meets these requirements. Follow the
+reference's build instructions, then set `scale_set.instance.image` to the
+resulting Oxide image name or ID. Extend the package and provisioning steps when
+workflows require additional tools.
 
 Shutting down the instance signals that it is ready for cleanup. The program's
 reconciliation loop removes the GitHub runner registration, instance, and boot

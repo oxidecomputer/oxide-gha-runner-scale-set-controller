@@ -1,0 +1,18 @@
+[Unit]
+Description=GitHub Actions Ephemeral Runner
+Documentation=https://docs.github.com/actions/hosting-your-own-runners
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=/opt/github-actions-runner
+Environment=HOME=/home/github-actions-runner
+Environment=USER=github-actions-runner
+Environment=LOGNAME=github-actions-runner
+UMask=0077
+ExecStartPre=/usr/bin/cloud-init status --wait
+ExecStart=/usr/local/libexec/github-actions-runner
+ExecStopPost=/usr/bin/systemctl --no-block poweroff
+Restart=no
+TimeoutStopSec=5min
