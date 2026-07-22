@@ -1,4 +1,4 @@
-BINARY ?= oxide-github-actions-runner-scaleset
+BINARY ?= oxide-gha-runner-scale-set-controller
 GOLANGCI_LINT := go tool -modfile=tools/go.mod golangci-lint
 
 .PHONY: check fmt fmt-check lint lint-check tidy tidy-check test build

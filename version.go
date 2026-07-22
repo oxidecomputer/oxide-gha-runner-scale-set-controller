@@ -6,7 +6,7 @@ package main
 
 import "runtime/debug"
 
-const applicationName = "oxide-github-actions-runner-scaleset"
+const applicationName = "oxide-gha-runner-scale-set-controller"
 
 // version and commit are populated by release builds using linker flags.
 var (

@@ -33,7 +33,7 @@ formatters:
       shorten-comments: true
     goimports:
       local-prefixes:
-        - github.com/oxidecomputer/oxide-github-actions-scaleset
+        - github.com/oxidecomputer/oxide-gha-runner-scale-set-controller
   exclusions:
     generated: disable
 

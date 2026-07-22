@@ -1,4 +1,4 @@
-module github.com/oxidecomputer/oxide-github-actions-runner-scaleset
+module github.com/oxidecomputer/oxide-gha-runner-scale-set-controller
 
 go 1.26.4
 

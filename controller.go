@@ -14,8 +14,8 @@ import (
 	"github.com/actions/scaleset/listener"
 	"github.com/oxidecomputer/oxide.go/oxide"
 
-	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/config"
-	"github.com/oxidecomputer/oxide-github-actions-runner-scaleset/internal/scaler"
+	"github.com/oxidecomputer/oxide-gha-runner-scale-set-controller/internal/config"
+	"github.com/oxidecomputer/oxide-gha-runner-scale-set-controller/internal/scaler"
 )
 
 type controller struct {
