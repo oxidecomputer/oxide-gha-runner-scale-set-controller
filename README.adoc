@@ -21,15 +21,17 @@ This program manages exactly one GitHub Actions scale set.
   resources. It runs when GitHub reports a change and periodically checks for
   resources that need cleanup.
 
-. To add capacity, the controller requests a just-in-time runner registration
-  from GitHub and creates an Oxide instance, boot disk, and network interface.
-  Instance user data downloads and verifies the configured Linux x64 GitHub
-  Actions runner, then starts it with the just-in-time registration. Each
-  instance runs at most one workflow job.
+. To add capacity, the program requests a just-in-time runner configuration from
+  GitHub and creates an Oxide instance, boot disk, and network interface. The
+  program uses cloud-init user data to write the just-in-time configuration to
+  `/run/github-actions-runner/jitconfig` within the instance, which the instance
+  must use to start the runner process. See <_runner_image, Runner image> below
+  for more information. Each instance runs at most one workflow job.
 
-. After the job finishes, the program removes the GitHub runner registration,
-  stops and deletes the Oxide instance, and deletes its boot disk. Idle
-  instances are removed in the same way when demand decreases.
+. After the job finishes, the runner image must shut down the instance. The
+  program removes the GitHub runner registration and deletes the instance and
+  its boot disk. It can also stop and clean up instances during scale-down or
+  when the expected runner lifecycle fails.
 
 === Stateless reconciliation and resource ownership
 
@@ -48,7 +50,7 @@ owned resources. Do not use the same prefix for manually managed resources.
 
 Changing `github.config_url`, `scale_set.name`, or `scale_set.runner_group`
 selects a different GitHub scale set or ownership namespace. Changing the Oxide
-project prevents the controller from discovering resources in the old project.
+project prevents the program from discovering resources in the old project.
 Drain before making any of these changes.
 
 IMPORTANT: Stateless reconciliation supports process restarts, not active-active
@@ -62,7 +64,7 @@ See link:config.example.yaml[`config.example.yaml`] for example configuration.
 === GitHub authentication
 
 `github.config_url` selects the GitHub repository, organization, or enterprise
-where the runner scale set is registered. The controller supports exactly one of
+where the runner scale set is registered. The program supports exactly one of
 these authentication methods.
 
 * *GitHub App* is preferred for repository and organization scale sets. Set
@@ -71,7 +73,7 @@ these authentication methods.
   is not supported for enterprise-level runner scale sets.
 * *Personal access token (PAT)* works for repository, organization, and
   enterprise scale sets. Set `github.auth.pat.token` or `GITHUB_TOKEN`. If
-  `github.auth` is omitted and `GITHUB_TOKEN` is set, the controller selects PAT
+  `github.auth` is omitted and `GITHUB_TOKEN` is set, the program selects PAT
   authentication automatically. Enterprise-level scale sets require a classic
   PAT.
 
@@ -83,7 +85,7 @@ variables or another secret-injection mechanism for the private key or token.
 
 === Oxide authentication
 
-The controller authenticates to an Oxide silo with an API token. Set the silo
+The program authenticates to an Oxide silo with an API token. Set the silo
 URL and token with `oxide.host` and `oxide.token`, or use `OXIDE_HOST` and
 `OXIDE_TOKEN`. YAML values take precedence over environment variables.
 
@@ -99,11 +101,40 @@ secret-injection mechanism over storing the token in `config.yaml`.
 
 === Runner image
 
-The configured image must be Linux x64, execute instance user data as `root`,
-and provide `curl`, `sha256sum`, `tar`, `useradd`, `su`, `shutdown`, and the
-GitHub Actions runner's system dependencies. It also needs outbound HTTPS access
-to GitHub. Install any tools needed by workflows, such as Git or Docker, in the
-image. The controller only installs the GitHub Actions runner itself.
+The configured image must be prepared as an ephemeral, single-job
+GitHub Actions runner image. This program does not install or start the
+runner process, it only writes the just-in-time (JIT) configuration to
+`/run/github-actions-runner/jitconfig` using cloud-init user data.
+
+The runner and its dependencies intentionally belong to the image rather than
+this program. Building them into the image makes instance startup
+deterministic, avoids downloading executable code during provisioning, and
+allows operators to control runner versions, workflow tools, patching, and
+security policy.
+
+The configured image is responsible for the following.
+
+* Process cloud-init user data during boot and wait for it to complete before
+  starting the runner process.
+* Include the GitHub Actions runner, its system dependencies, and any tools
+  required by workflows, such as Git or Docker.
+* Start the runner process with the contents of
+  `/run/github-actions-runner/jitconfig` passed to its `--jitconfig` option.
+  Each runner must execute at most one workflow job.
+* Shut down the instance whenever the runner process exits, whether the job
+  succeeds or fails. The launcher must also shut down the instance if it
+  encounters an error before or while starting the runner.
+* Provide outbound HTTPS access to GitHub and any other services required by
+  workflows.
+
+The link:https://github.com/oxidecomputer/packer-plugin-oxide[Oxide Packer
+plugin] can be used to automate building images that meets these requirements.
+
+Shutting down the instance signals that it is ready for cleanup. The program's
+reconciliation loop removes the GitHub runner registration, instance, and boot
+disk. If the image fails to start the runner or shut down correctly, periodic
+reconciliation eventually reaps the resources, but this is a fallback rather
+than the expected lifecycle.
 
 == Development
 
@@ -165,7 +196,7 @@ scale set.
 == Drain a scale set
 
 Before changing the GitHub configuration URL, scale set name, runner group, or
-Oxide project, stop the controller and set both runner limits to zero:
+Oxide project, stop the program and set both runner limits to zero:
 
 [source,yaml]
 ----
@@ -174,7 +205,7 @@ scale_set:
   max_runners: 0
 ----
 
-Restart the controller with the drain configuration. It stops acquiring jobs,
+Restart the program with the drain configuration. It stops acquiring jobs,
 removes idle runners, waits for busy runners to finish, removes their Oxide
 resources, deletes the GitHub scale set, and exits successfully. Apply the new
 scope, scale set name, group, or project only after the drain completes.

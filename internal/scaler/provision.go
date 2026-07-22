@@ -21,8 +21,7 @@ import (
 //go:embed userdata.sh.tmpl
 var userDataTemplateText string
 
-// userDataTemplate renders the user data script that downloads the
-// GitHub Actions runner and starts it with a JIT config.
+// userDataTemplate renders cloud-init user data containing the JIT config.
 var userDataTemplate = template.Must(
 	template.New("userdata").Parse(userDataTemplateText),
 )
@@ -138,13 +137,9 @@ func (s *Scaler) createInstance(
 ) (*oxide.Instance, error) {
 	var userData bytes.Buffer
 	err := userDataTemplate.Execute(&userData, struct {
-		JITConfig     string
-		RunnerVersion string
-		RunnerSHA256  string
+		JITConfig string
 	}{
-		JITConfig:     jitConfig.EncodedJITConfig,
-		RunnerVersion: s.runnerConfig.Version,
-		RunnerSHA256:  s.runnerConfig.SHA256,
+		JITConfig: jitConfig.EncodedJITConfig,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rendering user data: %w", err)

@@ -5,8 +5,6 @@
 package config
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -144,9 +142,6 @@ type ScaleSet struct {
 	//       - <label_b>
 	Labels []string `yaml:"labels"`
 
-	// Runner configures the GitHub Actions runner installed on each instance.
-	Runner Runner `yaml:"runner"`
-
 	// MinRunners is the minimum amount of runners to keep idle waiting for jobs.
 	// Set both MinRunners and MaxRunners to zero to drain the scale set.
 	MinRunners uint `yaml:"min_runners"`
@@ -161,17 +156,6 @@ type ScaleSet struct {
 
 	// Instance configures the Oxide instance the scale set launches.
 	Instance Instance `yaml:"instance"`
-}
-
-// Runner configures the GitHub Actions runner installed on each instance.
-type Runner struct {
-	// Version is the GitHub Actions runner release to install. It must be a
-	// version in X.Y.Z format.
-	Version string `yaml:"version"`
-
-	// SHA256 is the SHA-256 checksum of the Linux x64 runner archive for
-	// [Runner.Version].
-	SHA256 string `yaml:"sha256"`
 }
 
 // Instance configures the Oxide instance the scale set launches.
@@ -506,9 +490,6 @@ func (s *ScaleSet) Validate() error {
 	if s.Name == "" {
 		return fmt.Errorf("name is required")
 	}
-	if err := s.Runner.Validate(); err != nil {
-		return err
-	}
 	labelIndexes := make(map[string]int, len(s.Labels))
 	for i, label := range s.Labels {
 		label = strings.TrimSpace(label)
@@ -531,48 +512,6 @@ func (s *ScaleSet) Validate() error {
 		return fmt.Errorf("max_runners must be <= %d", math.MaxInt32)
 	}
 	return s.Instance.Validate()
-}
-
-// Validate validates the GitHub Actions runner configuration.
-func (r *Runner) Validate() error {
-	if r.Version == "" {
-		return fmt.Errorf("runner.version is required")
-	}
-	if !validRunnerVersion(r.Version) {
-		return fmt.Errorf("runner.version must use X.Y.Z format")
-	}
-	if r.SHA256 == "" {
-		return fmt.Errorf("runner.sha256 is required")
-	}
-	if len(r.SHA256) != sha256.Size*2 {
-		return fmt.Errorf(
-			"runner.sha256 must be a 64-character hexadecimal checksum",
-		)
-	}
-	if _, err := hex.DecodeString(r.SHA256); err != nil {
-		return fmt.Errorf(
-			"runner.sha256 must be a 64-character hexadecimal checksum",
-		)
-	}
-	return nil
-}
-
-func validRunnerVersion(version string) bool {
-	components := strings.Split(version, ".")
-	if len(components) != 3 {
-		return false
-	}
-	for _, component := range components {
-		if component == "" {
-			return false
-		}
-		for _, char := range component {
-			if char < '0' || char > '9' {
-				return false
-			}
-		}
-	}
-	return true
 }
 
 // Validate validates and normalizes the Oxide instance configuration.

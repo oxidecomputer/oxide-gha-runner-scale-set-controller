@@ -303,10 +303,6 @@ func testConfig() Config {
 			VPC:         "default",
 			Subnet:      "default",
 		},
-		Runner: RunnerConfig{
-			Version: "2.335.1",
-			SHA256:  strings.Repeat("a", 64),
-		},
 		ScaleSet: ScaleSetConfig{
 			Namespace: "test/linux-x64",
 			ID:        42,

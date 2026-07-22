@@ -179,10 +179,6 @@ func (c *controller) newScaler(
 			Logger: logger.WithGroup("scaler").With(
 				"project", scaleSetConfig.Instance.Project,
 			),
-			Runner: scaler.RunnerConfig{
-				Version: scaleSetConfig.Runner.Version,
-				SHA256:  scaleSetConfig.Runner.SHA256,
-			},
 			ScaleSet: scaler.ScaleSetConfig{
 				Namespace: c.config.GitHub.ConfigURL,
 				ID:        scaleSetID,
