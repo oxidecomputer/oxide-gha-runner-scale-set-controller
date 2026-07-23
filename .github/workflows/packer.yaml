@@ -9,7 +9,6 @@ on:
         default: colo
         required: true
         type: environment
-  push:
 
 permissions:
   contents: read
