@@ -1,0 +1,65 @@
+---
+name: Build Packer Image
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "GitHub environment containing the build configuration."
+        default: colo
+        required: true
+        type: environment
+  push:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: packer
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.environment || 'colo' }}
+    env:
+      PKR_VAR_source_image_name: ${{ vars.PACKER_SOURCE_IMAGE_NAME }}
+      PKR_VAR_project: ${{ vars.PACKER_PROJECT }}
+      PKR_VAR_ip_pool: ${{ vars.PACKER_IP_POOL }}
+      PKR_VAR_artifact_name: ${{ vars.PACKER_ARTIFACT_NAME }}
+      PKR_VAR_runner_version: ${{ vars.PACKER_RUNNER_VERSION }}
+      PKR_VAR_runner_sha256sum: ${{ vars.PACKER_RUNNER_SHA256SUM }}
+    defaults:
+      run:
+        working-directory: packer
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install Packer
+        uses: hashicorp/setup-packer@v3
+
+      - name: Initialize Packer
+        run: packer init ubuntu-26.04.pkr.hcl
+
+      - name: Check Packer Variables
+        run: |
+          : "${PKR_VAR_source_image_name:?source_image_name is not set}"
+          : "${PKR_VAR_project:?project is not set}"
+          : "${PKR_VAR_ip_pool:?ip_pool is not set}"
+          : "${PKR_VAR_artifact_name:?artifact_name is not set}"
+          : "${PKR_VAR_runner_version:?runner_version is not set}"
+          : "${PKR_VAR_runner_sha256sum:?runner_sha256sum is not set}"
+
+      - name: Validate Packer Configuration
+        run: packer validate ubuntu-26.04.pkr.hcl
+
+      - name: Build Image
+        run: >-
+          packer build
+          -color=false
+          ubuntu-26.04.pkr.hcl
+        env:
+          OXIDE_HOST: ${{ secrets.OXIDE_HOST }}
+          OXIDE_TOKEN: ${{ secrets.OXIDE_TOKEN }}

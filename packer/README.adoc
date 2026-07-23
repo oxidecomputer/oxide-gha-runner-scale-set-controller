@@ -1,0 +1,68 @@
+= Oxide GitHub Actions Runner Image
+
+This Packer configuration builds an Oxide image configured to work with the
+Oxide GitHub Actions Runner Scale Set Controller.
+
+== Usage
+
+. Export your Oxide credentials.
++
+[source,shell]
+----
+# Profile.
+export OXIDE_PROFILE='my-profile'
+
+# API token.
+export OXIDE_HOST='https://oxide.sys.example.com'
+export OXIDE_TOKEN='oxide-token-abc123'
+----
+
+. Download the `resolute-server-cloudimg-amd64v3.img` Ubuntu 26.04 image from
+https://cloud-images.ubuntu.com/resolute/current/.
+
+. Convert the image from QCOW2 to raw.
++
+[source,shell]
+----
+qemu-img convert -f qcow2 -O raw resolute-server-cloudimg-amd64v3.img resolute-server-cloudimg-amd64v3.img
+----
+
+. Upload the raw Ubuntu 26.04 image to your Oxide project. See
+link:https://docs.oxide.computer/guides/creating-and-sharing-images[Images]
+for information on how to do so.
+
+. Configure the Packer variables with your own values.
++
+.ubuntu-26.04.pkrvars.hcl
+[source,hcl]
+----
+source_image_name = "ubuntu-26-04"
+project           = "my-project"
+
+# Find the latest Linux x64 values at https://github.com/actions/runner/releases.
+runner_version    = "2.336.0"
+runner_sha256sum  = "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d"
+----
+
+. Initialize the Packer configuration.
++
+[source,shell]
+----
+packer init .
+----
+
+. Build the image.
++
+[source,shell]
+----
+packer build -var-file=ubuntu-26.04.pkrvars.hcl ubuntu-26.04.pkr.hcl
+----
+
+. When the build is finished, the resulting image name and ID will be shown.
+Take note of this image ID as it'll be used in subsequent sections.
++
+[source,shell]
+----
+==> Builds finished. The artifacts of successful builds are:
+--> oxide-instance.github-actions-runner: oxide-gha-runner (55bcf752-595e-425d-9923-817f82b0d5b8)
+----

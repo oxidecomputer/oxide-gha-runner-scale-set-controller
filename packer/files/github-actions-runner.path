@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for GitHub Actions JIT configuration
+
+[Path]
+PathExists=/run/github-actions-runner/jitconfig
+Unit=github-actions-runner.service
+
+[Install]
+WantedBy=multi-user.target
