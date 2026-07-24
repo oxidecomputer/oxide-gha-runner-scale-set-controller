@@ -33,11 +33,14 @@ for information on how to do so.
 
 . Configure the Packer variables with your own values.
 +
-.ubuntu-26.04.pkrvars.hcl
+.ubuntu-26.04.auto.pkrvars.hcl
 [source,hcl]
 ----
 source_image_name = "ubuntu-26-04"
-project           = "my-project"
+# Uncomment if the image is not a silo image.
+# source_image_project = "my-project"
+
+project = "my-project"
 
 # Find the latest Linux x64 values at https://github.com/actions/runner/releases.
 runner_version    = "2.336.0"
@@ -55,7 +58,7 @@ packer init .
 +
 [source,shell]
 ----
-packer build -var-file=ubuntu-26.04.pkrvars.hcl ubuntu-26.04.pkr.hcl
+packer build .
 ----
 
 . When the build is finished, the resulting image name and ID will be shown.
