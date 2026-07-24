@@ -24,7 +24,7 @@ https://cloud-images.ubuntu.com/resolute/current/.
 +
 [source,shell]
 ----
-qemu-img convert -f qcow2 -O raw resolute-server-cloudimg-amd64v3.img resolute-server-cloudimg-amd64v3.img
+qemu-img convert -f qcow2 -O raw resolute-server-cloudimg-amd64v3.img resolute-server-cloudimg-amd64v3.raw
 ----
 
 . Upload the raw Ubuntu 26.04 image to your Oxide project. See
