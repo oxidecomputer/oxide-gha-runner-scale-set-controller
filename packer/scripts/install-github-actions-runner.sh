@@ -24,6 +24,9 @@ if ! id github-actions-runner >/dev/null 2>&1; then
     --home-dir /home/github-actions-runner \
     --shell /bin/bash \
     github-actions-runner
+  usermod -aG sudo github-actions-runner
+  usermod -aG docker github-actions-runner
+  echo "%sudo   ALL=(ALL:ALL) NOPASSWD:ALL" > /etc/sudoers
 fi
 
 install_dir="/opt/github-actions-runner"
