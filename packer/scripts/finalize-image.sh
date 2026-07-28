@@ -39,7 +39,7 @@ rm -f /var/lib/systemd/random-seed
 # binary systemd journal files.
 journalctl --rotate || true
 journalctl --vacuum-time=1s || true
-find /var/log -type f ! -path '/var/log/journal/*' -exec truncate -s 0 {} +
+find /var/log -type f ! -path '/var/log/journal/*' -exec cp /dev/null {} \;
 rm -f /root/.bash_history "${build_home}/.bash_history"
 find /tmp /var/tmp -mindepth 1 -delete
 
