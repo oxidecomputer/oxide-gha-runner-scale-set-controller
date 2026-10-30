@@ -1,6 +1,6 @@
 module github.com/oxidecomputer/oxide-gha-runner-scale-set-controller
 
-go 1.26.4
+go 1.27.3
 
 require (
 	github.com/actions/scaleset v0.4.0

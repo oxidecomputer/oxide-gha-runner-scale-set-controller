@@ -2,7 +2,7 @@
   description = "oxide-gha-runner-scale-set-controller";
 
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
   };
 
   outputs =
@@ -21,7 +21,7 @@
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
           packages = [
-            pkgs.go
+            pkgs.go_1_27
             pkgs.gopls
             pkgs.gnumake
           ];
